@@ -1,0 +1,7 @@
+
+Algorithm:
+	sort()	
+		排序算法，可以自定义数据（重定义<比较符号）
+	lower_bound(first, last, val) 
+		在 first and last 之间查找大于或者等于 val的第一个值得位置，若没有找到则返回 last 的位置
+	

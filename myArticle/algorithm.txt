@@ -1,0 +1,395 @@
+1. 打印N阶行列相等矩阵
+	 int j=n/2，num=1;//初始值
+	 i=0;
+	 while(num!=n*n+1)
+	 {
+		//往右上角延升，若超出则用%转移到左下角
+	      Matr[(i%n+n)%n][(j%n+n)%n]=num;
+	    //斜行的长度和n是相等的，超出则转至下一斜行
+	    if(num%n==0)
+	          i++;
+	   else  
+	        {
+				i--;
+	          	j++;
+	      }
+	      num++;
+	 }
+	 
+2. 在一个文件中有 10G 个整数，乱序排列，要求找出中位数。内存限制为 2G。
+	2.1 采用桶排序。 将数据分组，统计每个分组的数据个数。
+	2.2 采用堆排序。
+
+3. 在一个文件里有40亿个整数，用4个字节表示整数。内存为1GB，求没有出现的数
+	3.1 4B的数有2^32个可能。
+	3.1 用一个bit位表示这个某个数字是否出现。遍历整个文件。
+
+4. 求1-10W个数字，删除两个，打乱。找出被删除的数字，输出。
+	1> 位图法：
+		设要处理的数据为B[10W-2];
+		A[10W]; //bit 位数组，每一位都初始化位0;
+		for(int i = 0; i<10W-2; i++)
+		{
+			A[B[i]] = 1;
+		}
+		// 输出最后值不为1的A数组的下标就是没有出现的数据。
+
+5. 服务器每一秒有2W个QQ号登入系统，统计5分钟之内重复登录的QQ号。
+	1> 分桶计算，将每一秒登录的QQ号hash之后存入相应的桶之中，并按照QQ号码大小
+		进行排序。
+	2> 系统维持两个链表
+		1. 指针链表，指向美秒登录的QQ链的链首。大小为300。超过300之后删除首部
+			指向的同一时间登录的链表。
+		2. 保存要输出的重复QQ.
+
+6. 编程常用的数学方法：
+	abs(int x);	//求绝对值
+	ceil(float x);	//不小于x的最小整数
+	exp(float x);	//e的x次幂
+	fabs(float x);	//浮点数x的绝对值
+	floor(float x);		//不大于x的最大整数
+	fmod(float x, float y);		//计算x/y的余数
+	hypot(float x, float y);	//给定直角三角两边，返回斜边
+	log10(float x);				//x的常用对数
+	modf(float x, int * i);		//x分解整数和小数部分，返回小数，整数存i
+	pow(float x, float y);		//计算x的y次幂
+	sqrt(float x);				//计算x的平方根
+
+6. 递归判断二叉树是否是平衡二叉树
+	// 先写一个递归求子树深度的算法，然后在遍历每个节点，若左右节点的深度差值大于1，就不是平衡树。
+	// 计算深度
+	int getDeepth(treeNode * root)
+	{
+		if(root == NULL)
+			return 0;
+		int leftDeepth = getDeepth(root->left);
+		int rightDeepth = getDeepth(root->right);
+
+		return leftDeepth > rightDeepth ? (leftDeepth + 1): (rightDeepth + 1);
+	}
+	// judge balanced tree
+	bool isBalanced(treeNode * root)
+	{
+		if(root == NULL)
+			return false;
+		int leftLength = getDeepth(root->left);
+		int rightLength = getDeepth(root->right);
+		int distance = leftLength > rightLength ? leftLength - rightLength : rightLength - leftLength;
+		if(distance > 1)
+			return false;
+		else
+			return isBalanced(root->left) && isBlanced(root->right);
+	}
+
+7. 找到任意两个的最近共同父节点
+		起始节点一定是相同的，直到出现第一个不相同的节点，就是最近公共父亲节点。
+		bool getRouteToRoot(treeNode *root, treeNode *target, Stack & st)
+		{
+			if(root == NULL)
+				return false;
+			if(target == root)
+			{
+				st.push(root);
+				return true;
+			}
+			if(getRouteToRoot(root->left) || getRouteToRoot(root->right))
+			{
+				st.push(true);
+				return true;
+			}
+			return false;
+		}
+		treeNode getParentNode(treeNode * root, treeNode * root1, treeNode * root2)
+		{
+			treeNode tmp =NULL;
+			Stack <treeNode *> st1;
+			getRouteToRoot(root, root1, st1);
+			Stack <treeNode *> st2;
+			getRouteToRoot(root, root2, st2);
+			while(st1.top() == st2.top())
+			{
+				tmp = st1.top();
+				st1.pop();
+				st2.pop();
+			}
+			return tmp;
+		}
+	2> 二进制法，确定给定节点的编号的二进制数据，左向右的公共部分就是最近公共父亲节点。
+		// 获取节点的编号
+		bool getPositionByNode(TreeNode * root, TreeNode * target, int & pos)
+		{
+			if(root == NULL)
+				return false;
+			if(root == target)
+				return true;
+			int tmp = pos;
+			pos = 2*tmp;
+			if(getPositionByNode(root->left, target, pos))
+				return true;
+			else
+			{
+				pos = 2*tmp + 1;
+				return getPositionByNode(root->right, target, pos);
+			}
+		}
+		// 获取公共节点
+		int getParent(int small, int large)
+		{
+			if(large == small)
+				return large;
+			// 获取int的二进制长度
+			int range = getLen(large) - getLen(small);
+			while(range > 0)
+			{
+				large = large>>1;
+				range--;
+			}
+			while(large != small)
+			{
+				large = large>>1;
+				small = small>>1;
+			}
+			return small;
+		}
+		// 由节点编号获取节点
+		TreeNode getNodeByPosition(TreeNode * root, int pos)
+		{
+			if(1 == pos)
+				return *root;
+			int pow = (int)Math.floor(Math.Log(pos));
+			pos -= 1 << pow;
+			while(pow > 0)
+			{
+		        if ((pos & 1 << (pow - 1)) == 0)
+            		root = root->Left;
+        		else
+            		root = root->Right;
+        		pow--;
+			}
+			return *root;
+		}
+
+8. 不用递归实现二叉树的先/中/后序遍历
+	// 先序
+	static void PreOrder(BinNode root)
+	{
+	    Stack stack = new Stack();
+	    BinNode temp = root;
+	    //入栈
+	    while (temp != null)
+	    {
+	        Console.WriteLine(temp.Element);
+	        if (temp.Right != null)
+	            stack.Push(temp.Right);
+	        temp = temp.Left;
+	    }
+	    //出栈，当然也有入栈
+	    while (stack.Count > 0)
+	    {
+	        temp = (BinNode)stack.Pop();
+	        Console.WriteLine(temp.Element);
+	        while (temp != null)
+	        {
+	            if (temp.Right != null)
+	                stack.Push(temp.Right);
+	            temp = temp.Left;
+	        }
+	    }
+	}
+	//后序遍历比较麻烦，需要记录上一个访问的节点，然后在本次循环中判断当前节点的Right或Left是否为上个节点，当前节点的Right为null表示没有右节点。
+	static void PostOrder(BinNode root)
+	{
+	    Stack stack = new Stack();
+	    BinNode temp = root;
+	    //入栈
+	    while (temp != null)
+	    {
+	        if (temp != null)
+	            stack.Push(temp);
+	        temp = temp.Left;
+	    }
+	    //出栈，当然也有入栈
+	    while (stack.Count > 0)
+	    {
+	        BinNode lastvisit = temp;
+	        temp = (BinNode)stack.Pop();
+	        if (temp.Right == null || temp.Right == lastvisit)
+	        {
+	            Console.WriteLine(temp.Element);
+	        }
+	        else if (temp.Left == lastvisit)
+	        {
+	            stack.Push(temp);
+	            temp = temp.Right;
+	            stack.Push(temp);
+	            while (temp != null)
+	            {
+	                if (temp.Left != null)
+	                    stack.Push(temp.Left);
+	                temp = temp.Left;
+	            }
+	        }
+	    }
+	}
+	//中序遍历，类似于前序遍历
+	static void InOrder(BinNode root)
+	{
+	    Stack stack = new Stack();
+	    BinNode temp = root;
+	    //入栈
+	    while (temp != null)
+	    {
+	        if (temp != null)
+	            stack.Push(temp);
+	        temp = temp.Left;
+	    }
+	    //出栈，当然也有入栈
+	    while (stack.Count > 0)
+	    {
+	        temp = (BinNode)stack.Pop();
+	        Console.WriteLine(temp.Element);
+	        if (temp.Right != null)
+	        {
+	            temp = temp.Right;
+	            stack.Push(temp);
+	            while (temp != null)
+	            {
+	                if (temp.Left != null)
+	                    stack.Push(temp.Left);
+	                temp = temp.Left;
+	            }
+	        }
+	    }
+	}
+
+9. 分解质因数
+	for(int i = 2; i<n; i++)
+	{
+		while(n%i == 0 && n>i)
+		{
+			cout<< i<<'*';
+			n /= i;
+		}
+	}
+	cout<< n;
+
+10. 最大公约数，最小公倍数
+	void getMaxCommonMultipleMinCommondivisor(int num1, int numn2)
+	{
+		// num1 < num2, assure this condition in apply
+		int a = num1, b = num2;
+		while(b != 0)
+		{
+			int temp = a%b;
+			a = b; 
+			b = temp;
+		}
+		int maxCommonMultiple = a;
+		int minCommondivisor = num1*num2/a;
+	}
+
+11. 打印杨辉三角
+	// 定义数组A[N][N]，A[i][0]和A[i][i]为1， i>=2时&j>0 A[i][j] = A[i-1][j-1] + A[i-1][j];
+12. 最大公共子串
+	char *maxSubStr(char *str1, char *str2)
+	{
+		char *p1, *p2, *q1, *q2, *destp;
+		char *substr;
+		int max=0, len;
+		
+		p1 = str1;
+		while(*p1!='\0')
+		{
+			q1=str2;
+			while(*q1!='\0')
+			{
+				len=0;
+				p2=p1;
+				q2=q1;
+				while((*p2!='\0')&&(*q2!='\0'))
+				{
+					if(*p2==*q2)
+					{
+						p2++;q2++;len++;
+					}
+					else
+					break;
+				}
+				if(len>max)
+				{
+					max = len;
+					destp =p1;
+				}
+				q1++;
+			}
+			p1++;
+		}
+		substr=(char*)malloc(sizeof(char)*max);
+		strcpy(substr,destp,max);
+		return substr;
+	}
+
+13. 拆分数字，求所有组合N=x+y+z+····
+	void split(int n, int m) 
+	{// n表示总数，m表示最大因子
+    	static int res[100];// 保存结果
+    	static int num=-1;// 当前因子下标
+ 	
+    	if (n<m || n<0 || m<1) return;
+    	num++;
+    	if (0==n) {// 递归终止条件，为0不可再分，直接输出
+    	    print(res,num+1);
+    	    num--;
+    	    return;
+    	} else {
+    	    if (n==m) {// 不拆，直接输出
+    	        res[num]=m;
+    	        print(res,num+1);
+    	        num--;
+    	    } else {
+    	        // 拆分出第一个
+    	        res[num]=m;
+    	        n=n-m;
+ 	
+    	        if (m>n) m = n; // 最大因子不可能大于总数
+ 	
+    	        for (int i=m;i>=1;--i) {// 	循环，第二个因子可以继续拆分，而且按照最大因子不同可以拆分成多个
+    	            split(n,i);
+    	        }
+    	        num--;
+    	    }
+    	}
+	}
+	void Split(int n) 
+	{
+    	if (n<=0) 
+    		return;
+    	if (100<n) 
+    	{
+        	printf("Up to 100\n");
+        	return;
+    	}
+    	for (int i=n;i>=1;--i) 
+    	{
+        	split(n, i);
+    	}
+	}	
+
+14. 正整数N的开方，要求不能用库函数sqrt，结果的精度在0.001
+	牛顿迭代
+	double x1 = 1;初值
+	double x2 = x1/2.0+N/2.0/x1;
+
+	while( fabs(x2-x1)>0.001)
+	{
+		x1 = x2;
+		x2 = x1/2.0+N/2.0/x1;
+	}
+
+15. 怎样实现一个类只有一个实例
+	单体模式。 
+	在类中声明一个静态变量，变量类型就是该类的指针。将类的构造函数私有化，然后定义一个共有的getInstance函数，用来得到类的静态指针。 
+
+16. 生成排列：
+
+C++ primer 20
