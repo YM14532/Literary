@@ -1,0 +1,271 @@
+AMS：
+    activity 显示过程
+          AMS                  APP                    WMS
+          reusme     ->        onresume    ->            addwindow
+          setAppVisiab            ->                    appVisiab
+                            finishdraw  ->            good to go
+                                                    showsurface
+                                                    hidesurface
+        1）    AMS resume  app进程响应resume
+        2）    AMS 设置各个activity的可见性 WMS 设置activity对应的窗口的可见性
+        3）    App进程对应的窗口绘制完毕WMS good to go,认为界面可以切换
+        4）    新的界面显示出来，旧的界面消失掉
+    Activity：
+        窗口界面相关：
+            启动应用:onCreate -> onStart -> onResume
+            按下返回键：onPause-> onStop -> onDestroy
+            近期任务启动：onCreate-> onStart-> onResume
+            hone键退出：onPause-> onStop
+            调整字体，从近期任务再次启动：onDestroy-> onCreate-> onStart-> onResume //activity 重新创建
+        应用启动关键流程:
+            开始-> Zygote-> 创建和初始化Application类-> 创建Activity类 -> onCreate() -> 配置主题信息-> onStart() -> OnResume() -> measure/layout/draw -> 显示
+应用启动：
+    Activity Content_Provider Broadcast Service 启动应用的过程，最终都是按照如下的调用方式来启动应用的。
+        startActivity()->AMS:startProcessLocked()
+        
+        启动被拦截：
+            这个拦截log会有打印InterceptInfo或者 handleStartActivity return checkAbnormalActivityCall undo!
+        输入法弹不出来：
+            FLAG_SHOW_WHEN_LOCKED 属性被拦截--加白名单
+        应用加固：
+            'art/runtime/oat_file_manager.cc:550] Check failed: error_msgs != nullptr 
+    Activity 启动过程：
+        先去调用performLaunchActivity()方法，创建Context、Window等对象。最终会调用到Activity.onCreate()方法。
+        再去调用handleResumeActivity()方法，handleResumeActivity()会调用performResumeActivity()来通知Activity组件它将要被激活，最终会调用 Activity.onResume()方法。
+
+WMS
+    APP动画驱动模式：
+    Vsync-->编舞者-->AnimationHandler-->ValueAnimator-->APP设定的回调
+    系统窗口动画：
+        AppWindowAnimator  WindowStateAnimator:
+            stepAnimationLocked：单步动画
+        WindowAnimator WMS管理类
+        SystemServer有动画执行->WindowAnimator：animator() 函数：
+        更新壁纸、转屏动画、窗口切换
+        dc.updatewindowForAnimator(this); // 为动画更新窗口
+                mUpdateWindowForAnimator:
+                初始化该参数的过程中，回去执行各个window的stepAnimationLocked 完成动画执行。
+    
+    WallPaper 窗口和 InputMethod 窗口
+        各个窗口进行Z-order 排序，排序依据是窗口类型。在WindowManager.LayoutParams 类中有Android 的窗口类型常量的定义，
+            以TYPE_作为前缀。这些窗口类型分为三类：应用窗口、子窗口和系统窗口，他们的层级值越来越大，Z-order 位置也越来越靠上面。
+        WindowManager.LayoutParams 类中定义这些属性常量，以FLAG_为前缀,WMS每删除后者添加一个窗口
+            都会中心计算WallPaperh和InputMethod窗口的位置。属性是FLAG_SHOW_WALLPAPER，当一个窗口设置了这个属性，
+            就说明这个窗口需要在其下面显示WallPaper 窗口。
+        
+        有两个窗口属性可以影响InputMethod 窗口的Z-order，他们是 FLAG_NOT_FOCUSABLE 和 FLAG_ALT_FOCUSABLE_IM。
+            1）当一个可见窗口没有设置这两个属性的时候，InputMethod 窗口的层级默认是要在其上面的，一般都是这种情况。如果这个窗口
+                上又没有任何可以接受输入的编辑框，那么InputMethod 窗口会自动隐藏。尽管InputMethod 窗口隐藏了，但是它的Z-order 还是在这个
+                窗口之上的。
+            2）如果一个窗口设置了FLAG_NOT_FOCUSABLE 属性，表示不接受key 事件， 该窗口上面的key 事件也会透过窗口传给下层；
+                InputMethod 窗口不会由该窗口确定，不会显示在其上方。
+            3）如果一个窗口设置了FLAG_ALT_FOCUSABLE_IM 属性，这个窗口仍然是可以接受key 事件。但是InputMethod 窗口不会由该窗口确
+                定，不会显示在其上方，将继续向下寻找合适的位置。
+            4）如果一个窗口同时设置了上面的两个属性，那么该窗口不可接受key 事件。InputMethod 窗口显示在其上方，但是该窗口上没有
+                编辑框的时候，InputMethod 窗口不会自动隐藏。
+        为 InputMethod 窗口寻找合适位置的算法在WindowManagerService.java 的findDesiredInputMethodWindowIndexLocked()函数里面。
+
+        
+
+Activity 应用视图创建流程
+    1 创建 context 对象
+        Activity的启动流程，最后一步是调用ActivityThread.perforLaunchActivity()方法在应用进程中创建一个Activity实例和上下文环境，即创建一个ContexImpl对象。
+        ActivityThread.performLaunchActivity(ActivityClientRecord r, Intent customIntent)
+            //1 从Intent中获取Activity的组件名ComponentName，调用对应的类加载器进行加载，调用
+            //Activity的默认构造方法进行实例创建。
+            
+            //2 调用ContextImpl的构造方法创建ContextImpl，并调用ContextImpl.setOuterContext()方法将已经创建完成的Activity关了给ContextImpl。
+            ContextImpl appContext = new ContextImpl();
+            appContext.init(r.packageInfo, r.token, this);
+            appContext.setOuterContext(activity);
+            
+            //3 调用Activity.attach()关联上下文信息、Activity信息、Intent信息等Activity运行所需要的信息。
+            activity.attach(appContext, this, getInstrumentation(), r.token,
+                            r.ident, app, r.intent, r.activityInfo, title, r.parent,
+                            r.embeddedID, r.lastNonConfigurationInstance,
+                            r.lastNonConfigurationChildInstances, config);
+                1 调用PolicyManager.makeNewWindow(this)创建了应用窗口Window，它实际是个PhoneWindow对象，它会接收一些事件，例如：键盘、触摸事件，它会 转发这些事件给它关联的Activity，转发操作通过Window.Callback接口实现。
+                2 将Activity运行的一些关键信息带入Activity。
+            //4 调用InstrumentationcallActivityOnCreate()，通知Activity你已经被创建，相关环境与信息也已经准备好，可以执行
+            // 你的onCreate()方法辣，接着Activity就去执行它的onCreate()方法了。
+            mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state);
+        总结： 
+            1 一个Android应用窗口的运行上下文环境是使用一个ContextImpl对象来描述的，这个ContextImpl对象会分别保存在Activity类的
+                父类ContextThemeWrapper和ContextWrapper的成员变量mBase中，即ContextThemeWrapper类和ContextWrapper类的成员变量
+                mBase指向的是一个ContextImpl对象。
+            2 Activity组件在创建过程中，即在它的成员函数attach被调用的时候，会创建一个PhoneWindow对象，并且保存在成员变量mWindow
+                中，用来描述一个具体的Android应用程序窗口。
+            3 Activity组件在创建的最后，即在它的子类所重写的成员函数onCreate中，会调用父类Activity的成员函数setContentView来创建
+                一个Android应用程序窗口的视图。
+    2 创建 window 对象
+        有上面步骤可以知道，创建 phonewindow 对象是在 attach 方法中进行的。
+        PhoneWindow // window 子类，应用视图窗口
+        WindowManagerImpl // 实现 WindowManager 接口，管理窗口
+        
+        1 PhoneWindow(Context, context) 
+            PolicyManager.makeNewWindow(this)用来创建Window对象，该函数通过反射最终调用Policy.makeNewWindow(Context context)，在这个 方法里调用了PhoneWindow的构造函数，返回了一个PhoneWindow对象。
+                myLayoutInflater
+                private DecorView mDecor：顶级View视图，它由mLayoutInflater来创建。
+                private ViewGroup mContentParent：视图容器。
+        
+        2 window.setCallback(); //Activity实现了Window.Callback接口，将Activity关联给Window，Window就可以将一些事件交由Activity处理
+        3 window.setSoftInputMode(); // 设置窗口的输入模式。
+        4 window.setWindowManager(); // 
+
+        总结：
+            1 一个Activity组件所关联的应用程序窗口对象的类型为PhoneWindow。
+            2 这个类型为PhoneWindow的应用程序窗口是通过一个类型为LocalWindowManager的本地窗口管理器来维护的。
+            3 这个类型为LocalWindowManager的本地窗口管理器又是通过一个类型为WindowManagerImpl的窗口管理器来维护应用
+            程序窗口的。
+            4 这个类型为PhoneWindow的应用程序窗口内部有一个类型为DecorView的视图对象，这个视图对象才是真正用来描述一个
+            Activity组件的UI的
+    3 创建View对象
+        每个Activity组件关联一个Window对象（PhoneWindow），而每个Window内部又包含一个View对象（DecorView），用来描述应用视图。
+        
+        1 ActivityThread.handleLaunchActivity(ActivityClientRecord r, Intent customIntent)
+            ActivityManagerService接收到SCHEDULE_LAUNCH_ACTIVITY_TRANSACTION进程间通信请求是触发的。
+        2 PhoneWindow.setContentView(int layoutRID) 
+        3 ActivityThread.handleResumeActivity(IBinder token, boolean clearHide, boolean isForward)
+        4 WindowManagerImpl.addView(View view, ViewGroup.LayoutParams params, boolean nest)
+        5 ViewRoot.setView(View view, WindowManager.LayoutParams attrs, View panelParentView)
+    
+    4 创建 WindowState 对象
+        前面我们就说过，WindowState对象是由WindowManagerService创建的，用来描述窗口相关信息，创建WindowState对象的过程也是与WindowManagerService连接的过程。
+    当我们启动应用的第一个Activity组件时，它会打开一个到WindowManagerService的连接，这个连接用应用进程从WindowManagerService服务处获取的一个实现了IWindowSession接口 的Session代理对象来表示，
+    在应用这一侧，每个Activity对象都关联了一个实现了IWindow接口的对象W，这个W对象在Activity视图创建完毕后，就会通过Session对象传递给WndowManagerService，
+    WindowManagerService接收到这个对象后，就会在内部创建一个WindowState对象来描述与该W对象关联的Activity窗口的状态，并且以后通过这个W对象控制对应的Activity的窗口状态。
+        Session：实现了IWindowSession接口，它保存在ViewRoot的静态变量sWindowSession中，用来与WindowManagerService通信。调用Session.add()方法将一个关联的W对象传递
+            给WindowManagerService，调用Session.remove()方法移除WindowManagerService之前为Activity窗口创建的WindowState对象。调用Session.relayout()方法来请求WindowManagerService 来对Activity组件的UI进行布局。
+        W：继承于IWindow.Stub，是ViewRoot的一个静态内部类，它同样也是ViewRoot的一个包装类，内部的功能通过调用ViewRoot的方法来完成，WindowManagerService可以通过它在内部创建的
+            WindowState对象的成员变量IWindow mClient来要求运行在应用进程这一侧的Activity组件配合管理窗口的状态。
+        WindowState：WindowManagerService的一个内部类，由WindowManagerService创建，用来描述应用窗口的状态。
+        
+        1 appWindowToken 
+            Activity组件在创建过程中，会调用ActivityStack.startActivityLocked()方法，该函数会请求WindowManagerService为正在启动的Activity组件创建一个AppWindowToken对象。
+        2 Session(IInputMethodClient client, IInputContext inputContext) )
+        3 WindowManagerService.addWindow()
+            Session对象的创建过程中，该对象保存在ViewRoot中，用来与WindowManagerService通信，接下来它会调用自己的add()方法来请求 WindowManagerService创建爱女WindowState对象。从上面的序列图我们可以知道，该方法最终会调用WindowManagerService.addWindow()方法。
+        4 WindowState
+    5 创建 Surface 
+        在应用进程这一侧，每一个Activity组件都要一个关联的Surface对象，这个Surface对象保存在一个关联的ViewRoot对象的成员变量mSurface中。它负责绘制应用窗口的UI，即 往应用窗口的图形缓冲区填充UI数据，
+        在WindowManagerService这一侧，每个Activity组件都有一个对应的WindowState对象，每个WindowState对象的成员变量同样指向一个Surface对象。它负责设置应用窗口的属性。
+        
+        从上面的创建View对象的分析我们可以知道，当一个应用窗口被激活且它的视图对象View创建之后就会调用View.requestLayout()方法对UI进行布局以及显示，整个流程如下所示：
+        
+        1 ViewRoot.performTraversals()
+            可以看到这里有个mSurface变量，它指向的是一个Surface对象，但是它还没有和C++层的Surface对象进行关联，因此它是一个无效的Surface对象 （UI绘制最终在C++层完成），因此我们要借助WindowManagerService来让它变得有效。
+            可以发现该方法会继续调用realyoutWindow()方法来请求系统重新布局系统中所有窗口，这个其实是由Sesssion对象请求WindowManagerService来完成的，
+                WindowManagerService在处理应用窗口时会为当期应用窗口创建一个有效的Surface。
+            WindowManagerService.realyoutWindow()会继续调用WindowState.createSurfaceLocked()来完成与C++层Surface对象的关联，使之成为有效的 Surface。
+        2 WindowState.createSurfaceLocked()
+            Surface里有三个主要成员变量：
+            private int mSurfaceControl: 保存的是在C++层的一个SurfaceControl对象的地址值。
+            private Canvas mCanvas：用来描述一块类型为CompatibleCanvas的画布，画布是真正用来绘制UI的地方。
+            private String mName：用来描述画布的名词。
+        总结：
+            每一个应用程序窗口都对应有两个Java层的Surface对象，其中一个是在WindowManagerService服务这一侧创建的，而另外一个是在应用程序进程这一侧创建的。
+            在WindowManagerService服务这一侧创建的Java层的Surface对象在C++层关联有一个SurfaceControl对象，用来设置应用窗口的属性，例如，大小和位置等。
+            在应用程序进程这一侧创建的ava层的Surface对象在C++层关联有一个Surface对象，用来绘制应用程序窗品的UI。
+            
+View
+    
+Window 
+    Activity持有一个Window，负责UI的展示与用户交互，里保存了很多重要的信息，如下所示：
+        mWindow：PhoneWindow对象，继承于Window，是窗口对象。
+        mWindowManager：WindowManagerImpl对象，实现WindowManager接口。
+        mMainThread：Activity对象，并非真正的线程，是运行在主线程里的对象。
+        mUIThread：Thread对象，主线程。
+        mHandler：Handler对象，主线程Handler。
+        mDecor：View对象，用来显示Activity里的视图。
+
+    ViewRootImpl负责管理DecorView与WindowManagerService的交互，每次调用WindowManager.addView()添加窗口时，都会创建一个ViewRootImpl对象，它内部也保存了一些重要信息，如下所示：
+        mWindowSession：IWindowSession对象，Session的代理对象，用来和Session进行通信，同一进程里的所有ViewRootImpl对象只对应同一个Session代理对象。
+        mWindow：IWindow.Stubd对象，每个窗口对应一个该对象。
+    
+    point_right 注：每个Activity对应一个Window，每个Window对应一个ViewRootImpl。
+    
+    Window 添加：
+        Windowglobal.java
+            WindowManagerGlobal:addview()
+                :class ViewRootImp // 封装view windowmanager交互
+                view.setLayoutParams(wparams);
+                //mViews存储着所有Window对应的View对象
+                mViews.add(view);
+                //mRoots存储着所有Window对应的ViewRootImpl对象
+                mRoots.add(root);
+                //mParams存储着所有Window对应的WindowManager.LayoutParams对象
+                mParams.add(wparams);
+                //调用ViewRootImpl.setView()方法完成Window的添加并更新界面
+                root.setView(view, wparams, panelParentView);
+                    ViewRootImpl:setView()
+                        //1. 调用requestLayout()完成界面异步绘制的请求
+                        requestLayout();
+                            scheduleTraversals()
+                                performTraversals()
+                        //2. 创建WindowSession并通过WindowSession请求WindowManagerService来完成Window添加的过程
+                        //这是一个IPC的过程。
+                        res = mWindowSession.addToDisplay(mWindow, mSeq, mWindowAttributes,
+                                getHostVisibility(), mDisplay.getDisplayId(),
+                                mAttachInfo.mContentInsets, mAttachInfo.mStableInsets,
+                                mAttachInfo.mOutsets, mInputChannel);
+    Window 删除：
+        WindowGlobal.java
+            WindowManagerGlobal:removeView();
+                //1. 查找待删除View的索引
+                int index = findViewLocked(view, true);
+                View curView = mRoots.get(index).getView();
+                //2. 调用removeViewLocked()完成View的删除, removeViewLocked()方法
+                //继续调用ViewRootImpl.die()方法来完成View的删除。
+                removeViewLocked(index, immediate);
+            removeViewLock();
+                boolean deferred = root.die(immediate);
+                    ViewRootImp:die()
+                         //根据immediate参数来判断是执行异步删除还是同步删除
+                        if (immediate && !mIsInTraversal) {
+                            doDie();  // 同步删除
+                                //调用dispatchDetachedFromWindow()完成View的删除
+                                dispatchDetachedFromWindow();
+                                    //1. 回调View的dispatchDetachedFromWindow方法，通知该View已从Window中移除
+                                    mView.dispatchDetachedFromWindow();
+                                    //调用WindowSession.remove()方法，这同样是一个IPC过程，最终调用的是
+                                    //WindowManagerService.removeWindow()方法来移除Window。
+                                //刷新数据，将当前移除View的相关信息从我们上面说过了三个列表：mRoots、mParms和mViews中移除。
+                                WindowManagerGlobal.getInstance().doRemoveView(this);
+                        // 异步删除，发送一个 MSG_DIE 的消息
+                        mHandler.sendEmptyMessage(MSG_DIE);
+        总结：
+            查找待删除View的索引
+            调用removeViewLocked()完成View的删除, removeViewLocked()方法继续调用ViewRootImpl.die()方法来完成View的删除。
+            ViewRootImpl.die()方法根据immediate参数来判断是执行异步删除还是同步删除，如果是异步删除则则发送一个删除View的消息MSG_DIE就会直接返回。 如果是同步删除，则调用doDie()方法。
+            doDie()方法调用dispatchDetachedFromWindow()完成View的删除，在该方法里首先回调View的dispatchDetachedFromWindow方法，通知该View已从Window中移除， 然后调用WindowSession.remove()方法，这同样是一个IPC过程，最终调用的是WindowManagerService.removeWindow()方法来移除Window。
+    window 更新：
+        WindowGlobal.java
+            WindowManagerGlobal:UpdateViewLayout()
+                //更新View的LayoutParams参数
+                view.setLayoutParams(wparams);
+
+                synchronized (mLock) {
+                    //查找Viewd的索引，更新mParams里的参数
+                    int index = findViewLocked(view, true);
+                    ViewRootImpl root = mRoots.get(index);
+                    mParams.remove(index);
+                    mParams.add(index, wparams);
+                    //调用ViewRootImpl.setLayoutParams()完成重新布局的工作。
+                    root.setLayoutParams(wparams, false);
+                        ViewRootImp:setLayoutParams();
+                            // 如果是新View
+                            requestLayout();
+                            // not new View
+                            scheduleTraversals();
+        总结:
+            更新View的LayoutParams参数，查找Viewd的索引，更新mParams里的参数。
+            调用ViewRootImpl.setLayoutParams()方法完成重新布局的工作，在setLayoutParams()方法里最终会调用scheduleTraversals() 进行解码重绘制，scheduleTraversals()后续的流程就是View的measure、layout和draw流程了，这个我们在上面已经说过了。
+    
+    Window 窗口大小计算
+
+http://blog.csdn.net/kc58236582/article/details/53835998
+http://blog.csdn.net/kc58236582/article/details/54092667
+http://blog.csdn.net/cauchyweierstrass/article/details/51087198
+http://blog.csdn.net/guoqifa29/article/details/49273065 https://github.com/guoxiaoxing/android-open-source-project-analysis/blob/master/doc/Android%E7%B3%BB%E7%BB%9F%E5%BA%94%E7%94%A8%E6%A1%86%E6%9E%B6%E7%AF%87/Android%E7%AA%97%E5%8F%A3%E7%AE%A1%E7%90%86%E6%A1%86%E6%9E%B6/Android%E6%98%BE%E7%A4%BA%E6%A1%86%E6%9E%B6%EF%BC%9AWindowManagerService%E5%85%B3%E4%BA%8E%E7%AA%97%E5%8F%A3%E7%9A%84%E8%AE%A1%E7%AE%97%E6%B5%81%E7%A8%8B.md
+
+

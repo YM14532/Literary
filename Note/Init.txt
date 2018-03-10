@@ -1,0 +1,215 @@
+init是第一个进程，我们可以说它是root进程或者说有进程的父进程。init进程有两个责任，一是挂载目录，比如/sys、/dev、/proc，二是运行init.rc脚本。
+    init进程可以在/system/core/init找到。
+    boot 的 init.rc文件可以在/system/core/rootdir/init.rc 找到
+    recovery的 init.re文件可以在/bootable/recovery/etc/init.rc 找到
+    对于init.rc文件，Android中有特定的格式以及规则。在Android中，我们叫做Android初始化语言。
+    Android初始化语言由四大类型的声明组成，即Actions（动作）、Commands（命令）、Services（服务）、以及Options（选项）。
+    Action（动作）：动作是以命令流程命名的，有一个触发器决定动作是否发生。
+        语法
+        1
+        2
+        3
+        4
+        on <trigger>
+            <command>
+            <command>
+            <command>
+        Service（服务）：服务是init进程启动的程序、当服务退出时init进程会视情况重启服务。
+        语法
+        1
+        2
+        3
+        4
+    service <name> <pathname> [<argument>]*
+        <option>
+        <option>
+        ...
+    Options（选项）
+        选项是对服务的描述。它们影响init进程如何以及何时启动服务。
+    默认的init.rc文件。这里我只列出了主要的事件以及服务。
+        Table
+        Action/Service    描述
+        on early-init    设置init进程以及它创建的子进程的优先级，设置init进程的安全环境
+        on init    设置全局环境，为cpu accounting创建cgroup(资源控制)挂载点
+        on fs    挂载mtd分区
+        on post-fs    改变系统目录的访问权限
+        on post-fs-data    改变/data目录以及它的子目录的访问权限
+        on boot    基本网络的初始化，内存管理等等
+        service servicemanager    启动系统管理器管理所有的本地服务，比如位置、音频、Shared preference等等…
+    ****service zygote    启动zygote作为应用进程
+        在这个阶段你可以在设备的屏幕上看到“Android”logo了。
+         init进程，它是一个由内核启动的用户级进程。内核自行启动（已经被载入内存，开始运行，
+        并已初始化所有的设备驱动程序和数据结构等）之后，就通过启动一个用户级程序init的方式，完成引导进程。init始终是第一个进程。
+        　　启动过程就是代码init.c中main函数执行过程：system\core\init\init.c
+        在函数中执行了：文件夹建立，挂载，rc文件解析，属性设置，启动服务，执行动作，socket监听……
+        下面看两个重要的过程：rc文件解析和服务启动。
+        1 rc文件解析
+        　　.rc文件是Android使用的初始化脚本文件 （System/Core/Init/readme.txt中有描述：
+        four broad classes of statements which areActions, Commands, Services, andOptions.）
+        　　其中Command 就是系统支持的一系列命令，如：export，hostname，mkdir，mount，等等，其中一部分是 linux 命令，
+        还有一些是 android 添加的，如：class_start ： 启动服务，class_stop ：关闭服务，等等。
+        　　其中Options是针对 Service 的选项的。
+        系统初始化要触发的动作和要启动的服务及其各自属性都在rc脚本文件中定义。 具体看一下启动脚本：\system\core\rootdir\init.rc
+            在解析rc脚本文件时，将相应的类型放入各自的List中：
+        　　\system\core\init\Init_parser.c  ：init_parse_config_file( )存入到
+        　　action_queue、   action_list、 service_list中，解析过程可以看一下parse_config函数，类似状态机形式挺有意思。
+        　　这其中包含了服务：adbd、servicemanager、vold、ril-daemon、debuggerd、surfaceflinger、zygote、media……
+ 
+二 ServiceManager启动
+       在.rc脚本文件中zygote的描述：
+    service servicemanager /system/bin/servicemanager
+    　　class core
+    　　user system
+    　　group system
+    　　critical
+    　　onrestart restart zygote
+    　　onrestart restart media
+    　　onrestart restart surfaceflinger
+    　　onrestart restart drm     
+           ServiceManager用来管理系统中所有的binder service，不管是本地的c++实现的还是java语言实现的都需要
+    这个进程来统一管理，最主要的管理就是，注册添加服务，获取服务。所有的Service使用前都必须先在servicemanager中进行注册。
+    　　do_find_service( )
+    　　do_add_service( )
+    　　svcmgr_handler( )
+    　　代码位置：frameworks\base\cmds\servicemanager\Service_manager.c
+    Init进程启动完成之后，还负责启动其他的一些重要守护进程，包括：
+    Usbd进程（USBDaemon）：USB连接后台进程，负责管理USB连接。
+    adbd进程（AndroidDebugBridgeDaemon）：ADB连接后台进程，负责管理ADB连接。
+    debuggerd进程(DebuggerDaemon)：调试器后台进程，负责管理调试请求及调试过程。
+    rild进程(RadioInterfaceLayerDaemon)：无线接口层后台进程，负责管理无线通信服务。
+
+init总结
+        1. 重新设置子进程终止时信号SIGCHLD的处理函数。
+        act.sa_handler = sigchld_handler;  //调用了wait函数等待子进程退出。
+        act.sa_flags = SA_NOCLDSTOP;
+        act.sa_mask = 0;
+        act.sa_restorer = NULL;
+        sigaction(SIGCHLD, &act, 0);
+     
+    2. 将kernel启动过程中建立好的文件系统框架mount到相应目录。
+        mount("tmpfs", "/dev", "tmpfs", 0, "mode=0755");
+       …
+        mount("devpts", "/dev/pts", "devpts", 0, NULL);
+        mount("proc", "/proc", "proc", 0, NULL);
+        mount("sysfs", "/sys", "sysfs", 0, NULL);
+       
+    3. open_devnull_stdio()，将init进程的标准输入、输出、出错设备设置为新建的设备节点/dev/__null__。
+    4. log_init()，创建并打开设备节点/dev/__kmsg__。
+    5. 读取并解析rc配置文件。
+        5.1 先从文件/sys/class/BOOT/BOOT/boot/boot_mode读出启动方式：Factory Mode, '4'；ATE Factory Mode, '6'。看是否是facatory模式。
+        5.2 如果是的话，需要读取并解析两个文件：init.factory.rc和init.rc。
+        5.3 如果是正常启动，则暂时先读取init.rc。
+            这里在读取解析文件的时候，是以行为最小可执行单位在解析。关于书写init.rc文件的初始化脚本语言的规则，可以上网查找。解析之后并不会马上执行，而是在init进入服务循环之前统一根据其命令本身所带的条件来执行。       
+    6.导入kernel的cmdline，也就是u-boot传递给kernel的参数，查看其中是否具有androidboot.xxx(androidboot.mode、androidboot.hardware等)参数，如果有，将其保存在同名字的xxx(mode、hardware)全局变量中。这里特别说明的是hardware这个参数，从kernel中导出一部分之后，又要从/proc/cpuinfo中导出一部分来组合成完整的hardware参数，因为后面接下来会读取并解析以特定平台的rc文件。
+    7. 读取特定平台相关的initrc文件，如:init.mt6516.rc。
+        需要注意的是：对于service，这里会给每个服务建立一个struct service的结构体，全部挂入链表service_list之中，在init最后才启动。       
+    8. 检查解析出来的所有命令行当中是否有属于early-init的，如果有，将其提出来加入到链表action_queue之中，马上将其执行掉。     
+    9. device_init()函数将会打开uevent的netlink socket，遍历/sys/class、/sys/block、/sys/devices目录，检查各级目录的uevent文件，处理在vold服务起来之前由kernel所发出来的device add, remove等事件。     
+    10.  property_init(), 顾名思义，是属性初始化。首先创建一个名字为system_properties的匿名共享内存区域，对并本init进程做mmap读写映射，其余共享它的进程只有读的权限。然后将这个prop_area结构体通过全局变量__system_property_area__传递给property services。
+        接着调用函数load_properties_from_file(PROP_PATH_RAMDISK_DEFAULT)从/default.prop文件中加载编译时生成的属性。           
+    11. 如果在root目录下有initlogo.rle文件存在，这个是两张android字样的缕空图片，将其读入fb中显示到LCD上。同时也要往串口上输出"             A N D R O I D "。如果图片不存在，就没有这两项的输出。     
+    12. 设置相应的属性：
+        property_set("ro.factorytest", "0")
+        property_set("ro.serialno",serialno[0] ?serialno : "");
+        property_set("ro.bootmode",bootmode[0] ?bootmode : "unknown");
+        property_set("ro.baseband",baseband[0] ?baseband : "unknown");
+        property_set("ro.carrier",carrier[0] ?carrier : "unknown");
+        property_set("ro.bootloader",bootloader[0] ?bootloader : "unknown");     
+        property_set("ro.hardware",hardware);
+        snprintf(tmp, PROP_VALUE_MAX, "%d",revision);
+        property_set("ro.revision", tmp);     
+    13.  开始执行以init为trigger的命令行：
+        action_for_each_trigger("init", action_add_queue_tail);
+        drain_action_queue();
+        前面有执行过eraly-init的。           
+    14.  启动属性服务：property_set_fd = start_property_service();
+        先读取剩余三个文件中的属性：/system/build.prop、/system/default.prop、/system/default.prop,然后用函数load_persistent_properties()加载persist.开始的属性，这种属性都是保存在目录/data/property下的以属性名为文件名的中。
+        接下来创建一个名为property_service的socket接口(SOCK_STREAM)，然后进入监听状态，等待属性事件到来。       
+    15.  创建一对socket，用来做信号方面的处理。
+        socketpair(AF_UNIX, SOCK_STREAM, 0, s)，signal_fd = s[0]，signal_recv_fd = s[1]。     
+    16.执行eraly-boot和boot为trigger的命令
+        action_for_each_trigger("early-boot", action_add_queue_tail);
+        action_for_each_trigger("boot", action_add_queue_tail);
+        drain_action_queue();           
+    17.执行init.rc中以property:开头的属性设置语句，同时使能属性触发方式。
+        queue_all_property_triggers();
+        drain_action_queue();           
+            property_triggers_enabled = 1;  //  可以执行那些以属性为条件的init语句。       
+       接下来就是利用poll机制监听前面创建的几个fd的动态。
+        struct pollfd ufds[4];
+        …
+        ufds[0].fd =device_fd;
+        ufds[0].events = POLLIN;
+        ufds[1].fd =property_set_fd;
+        ufds[1].events = POLLIN;
+        ufds[2].fd =signal_recv_fd;
+        ufds[2].events = POLLIN;
+         
+        for(;;) {
+             int nr, i, timeout = -1;
+                   
+            for (i = 0; i < fd_count; i++)
+                ufds[i].revents = 0;
+            
+             drain_action_queue(); //执行action_queue链表中后来新出现的command。
+             restart_processes();  // 第一次启动所有服务，也包括后来restart这些
+        服务。restart_service_if_needed() à service_start(svc, NULL) à fork()
+            
+             …
+             nr = poll(ufds, fd_count, timeout);
+             if (nr <= 0)
+                    continue;
+            
+             if (ufds[2].revents == POLLIN) {
+                    /* we got a SIGCHLD - reap and restart as needed */
+                    read(signal_recv_fd, tmp, sizeof(tmp));
+                    while (!wait_for_one_process(0))
+                        ;
+                    continue;
+             }
+            
+             if (ufds[0].revents == POLLIN)
+                  handle_device_fd(device_fd);  // Vold的netlink类型的socket
+            
+             if (ufds[1].revents == POLLIN)
+                  handle_property_set_fd(property_set_fd);//属性服务的socket
+             if (ufds[3].revents == POLLIN)
+                    handle_keychord(keychord_fd);
+        }
+        到这里init就进入了死循环中一直在监听ufds中的4个文件描述符的动静，如果有POLLIN的事件，就做相应的处理，所以init并没有退出或者进入idle，而是被当做一个服务在运行。第4个文件描述符是keychord_fd，暂时不清楚这个怎么用，不过通过它也可以启动服务，可参考源码。
+        下面是init.rc的例子，见附件init.rc
+       
+二、init中启动的各种服务
+    在init中启动起来的服务按照init.rc中的先后顺序，大致有：
+    console: start a shell，code path: system/bin/sh,其源码中包含常用的shell命令，如ls，cd等。
+    adbd: start adb daemon,通常带有disabled的选项，表明需要按名字启动，code path：system/bin/adb。
+    servicemanager：这个服务管理着系统内所有binder services。code path: frameworks/base/cmds/servicemanager。
+    Vold: android 的udev，code path: system/vold。
+    Netd: start ntd daemon, code path: system/netd。
+    Debuggerd: start debug system, code path: system/core/debuggerd。
+    zygote: ['zaigəut]这是一个非常重要的服务，稍后详解。start Android  JavaRuntime  and start systemserver。code path：frameworks/base/cmds/app_process。
+    media: add AudioFlinger，AudioPolicyService，MediaPlayerService and CameraService to servicemanager，同时启动管理binder通讯的机制，依靠这两个类来完成binder机制在android中间层所体现的功能：ProcessState 和IPCThreadState。Code path：frameworks/base/media/mediaserver。
+    bootanim: 开机动画和铃声，code path：frameworks/base/cmds/bootanimation。     
+    接下来就是关于modem的服务，如：ccci_fsd、ccci_mdinit、pppd_gprs、pppd、gsm0710muxd、muxtestapp、sockcli、socksrv、muxreport、ril-daemon等，除了前面2个，后面的都带有disabled的参数，需要按名启动。     
+    Installd: start install package daemon, code path:
+    frameworks/base/cmds/installd。
+    后面还有很多关于其他硬件的服务，比如BT、WIFI等。     
+2.1 servicemanager
+    这个服务进程代码比较简单，功能也简单，c实现的，用来管理系统中所有的binder service，不管是本地的c++实现的还是Java语言实现的都需要这个进程来统一管理，最主要的管理就是，注册添加服务，获取服务。
+    这些binder服务在对外公开之前都必须将自身拥有的binder实体注册到SMgr中，而其他进程如果需要使用binder service的功能，也必须先经过SMgr取得 binder service中的binder实体在SMgr中对应的引用号（binder的引用号和进程中文件描述符概念类似，有效范围只限于本进程）。    
+    #define BINDER_SERVICE_MANAGER ((void*) 0)  
+    int main(int argc, char **argv) 
+    { 
+        struct binder_state *bs; 
+        void *svcmgr = BINDER_SERVICE_MANAGER;  
+        bs = binder_open(128*1024);   
+        // 打开binder设备，mmap映射当前进程的binder接收缓冲区，返回一个binder_state结构体  。
+        if (binder_become_context_manager(bs)) {     
+        // 通过这个函数将当前进程设置成服务管理进程MSgr，整个系统就这一个。 
+           …
+        } 
+        svcmgr_handle = svcmgr;    
+        binder_loop(bs, svcmgr_handler);  
+     /*svcmgr_handler作为处理函数，所能完成的操作有：获取service，查看service是否存在，添加service ，列出service清单。其中用的最多的就是获取、添加。*/ 
+        return 0; 
+    }

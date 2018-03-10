@@ -1,0 +1,28 @@
+ServerManager用来管理server并向client提供查询server远程接口的功能
+
+/framework/base/cmds/servicemandger: binder.h, binder.c servie_manager.c
+
+main()
+	struct binder_state * bs;
+		binder_state
+			int fd;		//描述符
+			void * mapped;	//设备文件/dev/binder映射到进程空间的起始地址
+			unsigned mapsized;	// 内存映射大小
+	
+	bs = binder_open();
+		bs->open("/dev/binder", O_RDWR);
+			binder驱动：binder_open()
+				struct binder_proc
+					threads 保存binder_proc进程中用户请求线程 
+					nodes 保存Binder实体
+					refs_by_desc binder引用
+					refs_by_node 同上
+		bs->mapped = mmap();
+			binder 驱动 binder_mmap()
+	
+	if(binder_become_context_manager(bs))
+	
+	svcmgr_handle = svcmgr;
+	binder_loop(bs, svcmgr_handle);
+
+http://blog.csdn.net/luoshengyang/article/details/6621566

@@ -1,0 +1,14 @@
+Bindre通信
+
+获取Service Manager远程接口的函数是defaultServiceManager，这个函数声明在
+	frameworks/base/include/binder/IServiceManager.h文件中：
+	实现在framework/base/libs/binder/IServiceManager.cpp中：
+	gDefaultServiceManager是单例模式，调用defaultServiceManager函数时，如果gDefaultServiceManager已经创建，
+		则直接返回，否则通过interface_cast<IServiceManager>(ProcessState::self()->getContextObject(NULL))
+		来创建一个，并保存在gDefaultServiceManager全局变量中。
+	IServiceManager类继承了IInterface类，而IInterface类和BpRefBase类又分别继承了RefBase类。
+		在BpRefBase类中，有一个成员变量mRemote，它的类型是IBinder*，实现类为BpBinder，它表示一个Binder引用，
+		引用句柄值保存在BpBinder类的mHandle成员变量中。BpBinder类通过IPCThreadState类来和Binder驱动程序并互，
+		而IPCThreadState又通过它的成员变量mProcess来打开/dev/binder设备文件，
+		mProcess成员变量的类型为ProcessState。ProcessState类打开设备/dev/binder之后，
+		将打开文件描述符保存在mDriverFD成员变量中，以供后续使用。

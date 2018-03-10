@@ -1,0 +1,535 @@
+RecoveryMode
+    
+手机系统启动模式
+    NormalMode ：正常启动之后->(MainSystem)
+    FastBootMode ：线刷
+    RecoveryMode：卡刷（OTA）
+1 RecoveryMode的两个通信接口
+    1.1 MainSystem & RecoveryMode :/cache
+        /cache/recovery/command:存储Mainsystem传给recovery的命令行，每一行就是一条命令
+            --send_intent=anything         // 在Recovery结束时，通过finish_recovery函数写入到这里，然后写入 /cache/recovery/intent, 就是升级的结果。
+        /cache/recovery/intent
+            -update_package=root:path    // 安装升级包的路径 --MainSystem写入这条时说明需要升级
+            --wipe_data                    // 擦除用户数据，擦除data分区必须擦除cache分区，完成后重启
+            --wipr_cache                // 擦除 cache 分区，不擦除 data 分区，完成后重启。
+            --set_encrypted_filesystem = on|off -enables / disables encrypted fs
+                //启用禁用文件加密系统
+            --just_exit - do nothing    //退出并重启
+        
+        /cache/recovery/log        // recovery模式的log打印，recovery运行过程中stdout以及
+            stderr会重定位到 /temp/recovery.log, 退出后转存到/cache/recovery/log中
+        /cache/recovery/intent:    Recovery传递给MainSystem的信息。例如反馈升级是否成功。
+        /cache/recovary/last_install：//上一次的安装包
+        /caceh/recovery/last_log    //保存recovery的log
+        /cache/recovery/last_locale        //保存到cache分区，如果下次启动recovery没有-locale参数，使用这个
+        
+        2 具体操作方法：
+        上层mainsystem通过调用android标准类：RecoverySystem  /framework/base/core/java/android
+                                                            /os/RecoverySystem.java
+        installPackage()        //重启设备安装指定文件,在cache/recovery/command里写入
+            --update_package=/path/xxx.zip
+        rebootWipeUserData()    //重启设备并清除user data分区 ‘工厂复位’，在/cache/recovery/command
+            写入“--wipe_data”
+        rebootWipeCache()        //重启进入recovery清除cache分区，写入“--wipe_data”
+        verifyPackage()            //校验下载的升级包是否符合android的签名认证
+            系统重启进入RecoveryMode然后读取/cache/recovery/command指令并执行
+    
+    1.2 BootLoader & RecoveryMode : BCB (Bootloader Control Block)
+        BootLoader & MainSystem : BCB 
+            --MISC分区，占用3个page
+        struct bootloader_message{
+            char commad[32];
+            char status[32];
+            char recovery[1024];  //我厂改为了768
+            char stage[32]
+            char reserved[224]
+            ···
+        }
+        command : 
+            重启进入recovery时或者更新redio、bootloader固件时候。linux会更新这个值。
+            更新完成后会bootloader会更新这个值，recovery结束清除这个值。
+        status    : 完成更新时，BootLoader会将结果写入到这个字段
+        recovery：可被MainSystem写入，也可以被Recovery服务程序写入，内容格式为：
+            “recovery.h
+            <recovery command> \n
+            <recovery command>"
+            
+            recovery command是/cache/recovery/command支持的命令。recovery先读取BCB再读取
+                /cache/recovery/command 然后将后者重新写入BCB，在进入MainSystem之前确保命令执行
+                进入MainSystem中之后，清除BCB的command和recovery
+                
+Update.ZIP生成过程
+    1、update.zip包的目录结构
+          |----boot.img
+          |----system/
+          |----recovery/
+                `|----recovery-from-boot.p
+                `|----etc/
+                        `|----install-recovery.sh
+          |---META-INF/
+              `|CERT.RSA
+              `|CERT.SF
+              `|MANIFEST.MF
+              `|----com/
+                     `|----google/
+                             `|----android/
+                                    `|----update-binary
+                                    `|----updater-script
+                             `|----android/
+                                    `|----metadata
+                           
+        1 . build/envsetup.sh。 
+        2 lunch 然后选择你需要的配置。
+        3 make otapackage  
+            1 编译makefile生成原始包编译Makefile。对应的Makefile文件所在位置：build/core/Makefile。
+                从该文件的884行（tcc8800,gingerbread0919）开始会生成一个zip包，这个包最后会用来制作OTA package
+                或者filesystem image。
+                 首先创建一个root_zip根目录，并依次在此目录下创建所需要的如下其他目录
+                ①创建RECOVERY目录，并填充该目录的内容，包括kernel的镜像和recovery根文件系统的镜像。此目录最终用于生成recovery.img。
+                ②创建并填充BOOT目录。包含kernel和cmdline以及pagesize大小等，该目录最终用来生成boot.img。
+                ③向SYSTEM目录填充system image。
+                ④向DATA填充data image。
+                ⑤用于生成OTA package包所需要的额外的内容。主要包括一些bin命令。
+                ⑥创建META目录并向该目录下添加一些文本文件，如apkcerts.txt(描述apk文件用到的认证证书)，misc_info.txt
+                    (描述Flash内存的块大小以及boot、recovery、system、userdata等分区的大小信息)。
+                ⑦使用保留连接选项压缩我们在上面获得的root_zip目录。
+                ⑧使用fs_config(build/tools/fs_config)配置上面的zip包内所有的系统文件(system/下各目录、文件)的权限属主等信息。
+                    fs_config包含了一个头文件#include“private/android_filesystem_config.h”。在这个头文件中以硬编码的方式设定了system目录下各文件的权限、属主。
+                    执行完配置后会将配置后的信息以文本方式输出 到META/filesystem_config.txt中。并再一次zip压缩成我们最终需要的原始包
+            2 上面的zip包只是一个编译过程中生成的原始包。这个原始zip包在实际的编译过程中有两个作用，
+                一是用来生成OTA update升级包，二是用来生成系统镜像。在编译过程中若生成
+                OTA update升级包时会调用（具体位置在Makefile的1037行到1058行）一个名为ota_from_target_files的python脚本，
+                位置在/build/tools/releasetools/ota_from_target_files。这个脚本的作用是以第一步生成的zip原始包作为输入，
+                最终生成可用的OTA升级zip包。
+                主函数main是python的入口函数，我们从main函数开始看，大概看一下main函数（脚本最后）里的流程就能知道脚本的执行过程了。
+                       1 在main函数的开头，首先将用户设定的option选项存入OPTIONS变量中，它是一个python中的类。紧接着判断有没有额外的脚本，如果有就读入到OPTIONS变量中。
+                       2 解压缩输入的zip包，即我们在上文生成的原始zip包。然后判断是否用到device-specific extensions（设备扩展）如果用到，随即读入到OPTIONS变量中。
+                       3 判断是否签名，然后判断是否有新内容的增量源，有的话就解压该增量源包放入一个临时变量中（source_zip）。自此，所有的准备工作已完毕，随即会调用该 脚本中最主要的函数WriteFullOTAPackage(input_zip,output_zip)
+                       4 WriteFullOTAPackage函数的处理过程是先获得脚本的生成器。默认格式是edify。然后获得metadata元数据，此数据来至于Android的一些环境变量。然后获得设备配置参数比如api函数的版本。然后判断是否忽略时间戳。
+                       5 WriteFullOTAPackage函数做完准备工作后就开始生成升级用的脚本文件(updater-script)了。生成脚本文件后将上一步获得的metadata元数据写入到输出包out_zip。
+                       6至此一个完整的update.zip升级包就生成了。生成位置在：out/target/product/tcc8800/full_tcc8800_evm-ota-eng.mumu.20120315.155326.zip。将升级包拷贝到SD卡中就可以用来升级了。
+    2 Android OTA增量包update.zip的生成
+         在上面的过程中生成的update.zip升级包是全部系统的升级包。大小有80M多。这对手机用户来说，用来升级的流量是很大的。而且在实际升级中，我们只希望能够升级我们改变的那部分内容。这就需要使用增量包来升级。生成增量包的过程也需要上文中提到的ota_from_target_files.py的参与。
+         下面是制作update.zip增量包的过程。
+          1 在源码根目录下依次执行下列命令
+           $ . build/envsetup.sh
+           $ lunch 选择17
+           $ make
+           $ make otapackage
+           执行上面的命令后会在out/target/product/tcc8800/下生成我们第一个系统升级包。我们先将其命名为A.zip
+          2 在源码中修改我们需要改变的部分，比如修改内核配置，增加新的驱动等等。修改后再一次执行上面的命令。就会生成第二个我们修改后生成的update.zip升级包。将  其命名为B.zip。
+          3 在上文中我们看了ota_from_target_files.py脚本的使用帮助，其中选项-i就是用来生成差分增量包的。使用方法是以上面的A.zip 和B.zip包作为输入，以update.zip包作  为输出。生成的update.zip就是我们最后需要的增量包。
+              具体使用方式是：将上述两个包拷贝到源码根目录下，然后执行下面的命令。
+              $ ./build/tools/releasetools/ota_from_target_files -i A.zip B.zip update.zip。
+              在执行上述命令时会出现未找到recovery_api_version的错误。原因是在执行上面的脚本时如果使用选项i则会调用WriteIncrementalOTAPackage会从A包和B包中的META目录下搜索misc_info.txt来读取recovery_api_version的值。但是在执行make  otapackage命令时生成的update.zip包中没有这个目录更没有这个文档。
+              此时我们就需要使用执行make otapackage生成的原始的zip包。这个包的位置在out/target/product/tcc8800/obj/PACKAGING/target_files_intermediates/目录下，它是在用命令make otapackage之后的中间生产物，是最原始的升级包。我们将两次编译的生成的包分别重命名为A.zip和B.zip，并拷贝到SD卡根目录下重复执行上面的命令：
+               $ ./build/tools/releasetools/ota_form_target_files -i A.zip B.zip update.zip。
+              在上述命令即将执行完毕时，在device/telechips/common/releasetools.py会调用IncrementalOTA_InstallEnd,在这个函数中读取包中的RADIO/bootloader.img。
+
+              
+2 相关实现过程
+    1 恢复出厂设置--（抹掉全部数据和应用）
+        recovery.cpp 中完成
+        1. 用户选择恢复设置
+        2. mainsystem 写入/cache/recovary/commad --wipe_data，重启进入recovery
+        3. 通过get_args在BCB中写入boot-recovery和wipe-data命令
+        4. 进行erase_volume
+        5. 擦除数据之后调用finfsh_recovery将BCB中的数据清除
+        6. main函数调用reboot()进入MainSystem
+        详细实现过程：
+        1 /SDM660.LA.1.0_Master/android/oppo/apkfiles_code/priv-app
+            /PersonalCenter/Settings/src/com/android/settings/MasterClearConfirm.java
+            上述MasterClearConfirm类中的doMasterClear()方法会发送一个恢复出厂设置的带参数广播
+        2 frameworks/base/services/core/java/com/android/server/MasterClearReceiver.java
+            会接受此广播 onReceive()，检测合格之后调用RecoverySystem.rebootWipeUserData()
+            | rebootFormatUserData 前者删除所有数据和应用，后者只删除数据
+        3 frameworks/base/core/java/android/os/RecoverySystem.java 中的方法 rebootWipeUserData
+            调用bootCommand() 参数--wipe_data/--format_data(欧厂) 向/cache/recovery/command中写入的命令，
+            该函数调用 rebootRecoveryWithCommand(),最终调用IRecoverySystem.rebootRecoveryWithCommand 方法，
+            该方法是Binder对象的方法，具体实现在
+            frameworks/base/services/core/java/com/android/server/RecoverySystemService.java中
+            setupOrClearBcb方法：
+            1 建立socket与uncrypt socket通信，然后开始向socket中写入command命令参数f
+##honglouQ:uncrypt socket是怎么实现的。。。
+        4 完成之后调用PowerManager服务的reboot方法进行重启。
+            frameworks/base/core/java/android/os/PowerManager.java.
+            调用IPowerManager.reboot() binder调用powermanagerservice的reboot方法。
+                调用shutdownOrRebootinternal() 执行ShutdownThread.reboot();执行shutdownInner()方法
+                关机动画在这里可以设置是否默认或者客制化。beginShutdownSequence()
+                 sInstance.start();这个方法，就走到了run（）方法,ShutDownThread.java这个类的run（）方法
+                 running（）这个方法：
+                这个方法做了一些列的操作，会关闭一些操作，如：
+                shutdownRadios(MAX_RADIO_WAIT_TIME);
+                mount.shutdown(observer);
+                stMgr.shutdown(mContext);
+                rebootOrShutdown(mReboot, mRebootReason);这个方法；准备重启的方法；关机震动
+                PowerManagerService.java:PowerManagerService.lowLevelReboot(); 调用到native层实现关机
+        5 重启系统    
+        
+    2 OTA INSTALL（OTA升级）
+        1 升级系统下载 OTA包到/cache/some-filename.zip，可以自己选择合适的位置。
+        2 升级系统写入recovery命令"--update_package=CACHE:some-filename.zip(路径)"
+        3 重启，并进入recovery模式，PowerManager 的 reboot(“recovery”) 实现的
+        4 get_args() 将"boot-recovery" 和 "--update_package=..." 写入BCB，保证即使设备故障了，重启之后还是执行更新操作。
+        5 install_package() 升级
+        6 finish_recovery() 擦除 BCB
+        7 如果安装包失败：prompt_and_wait() 等待用户操作，选择ALT+S或ALT+W 升级或恢复出厂设置
+        8 main() 调用 maybe_install_firmware_update()
+            1 如果包里有hboot/radio的firmware则继续，否则返回
+            2 将 "boot-recovery" 和 "--wipe_cache" 写入BCB
+            3 将 firmware image写入cache分区
+            4 将 "update-radio/hboot" 和 "--wipe_cache" 写入BCB
+            5 重启系统
+            6 bootloader自身更新firmware
+            7 bootloader 将 "boot-recovery" 写入BCB
+            8 erase_root() 擦除CACHE分区
+            9 清除 BCB
+        9 main() 调用 reboot() 重启系统，进入 MainSystem。
+    
+3 代码过程
+    
+    install_packages过程：
+        安装过程在/bootable/recovery/install.cpp中， 
+        install_package(const char* path, int* wipe_cache, const char* install_file, bool needs_mount) 
+            在recovery的main函数中传入的参数如下： 
+        install_package(update_package, &wipe_cache, TEMPORARY_INSTALL_FILE, true); 
+        参数列表： 
+            -Path：传入的安装包地址 
+            -wipe_cache：是否擦除cache分区 
+            -install_file：实际上是安装过程的临时安装文件的地址（/tmp/last_install），包括install_log 
+            -needs_mount：是否需要Mount，安装过程传入的是true 
+        
+        install_package函数中，真正调用的是really_install_package函数: 
+            result = really_install_package(path, wipe_cache, needs_mount); 
+        重要流程： 
+            -Set_install_mounts：检查安装包所在路径的分区是否挂载，否则返回安装失败 
+            -Set_backgroud：升级过程的UI界面显示 
+            -Load_keys，加载公钥，我们系统的签名文件放在/build/target/product/security/目录下。这样做的目的是为了防止用户使用不同的项目的升级包进行混刷，导致刷机变砖的情况； 
+            -verify_file()：对升级包update.zip包进行签名验证； 
+            -mzOpenZipArchive()：打开升级包，并将相关的信息拷贝到一个临时的ZipArchinve变量中。这一步并未对我们的update.zip包解压。 
+            -try_update_binary()：在这个函数中才是对我们的update.zip升级的地方。这个函数一开始先根据我们上一步获得的zip包信息，以及升级包的绝对路径将update_binary文件拷贝到内存文件系统的/tmp/update_binary中 
+            -execv(binary,args)的作用就是去执行binary程序，这个程序的实质就是去解析update.zip包中的updater-script脚本中的命令并执行 
+            
+        
+    所有过程：
+    在init进程中完成大致两方面的工作
+        1 初始化：包括建立/dev, /proc等目录，初始化属性，执行inti.rc等初始化文件中的action 以及 services/core/java/com/android/server/MasterClearReceiver
+        2 使用for循环无限循环建立子进程。
+        
+        /system/core/init/init.cpp
+        main()
+            mkdir, mount
+                //get the basic filesystem setup we need put together in the initramdisk
+            property_inti()
+                // 为属性分配内存空间
+            get_hardware_name(harawore, &revision)
+                // 该方法主要用于确定hardware和revision的变量的值。在init.rc文件中会引用 inti./inti.${ro.hardware}.rc配置文件，该函数确定hardware值
+            process_kernel_cmdline()
+                // 使用import_kernel_cmdline函数导入内核变量，调用export_kernel_boot_props函数通过属性设置内核变量
+                    例如通过ro.boot.hardware属性值设置hardware变量。即可以通过ro.boot.hardware属性值修改get_hareware_name
+                    函数从/proc/cpuinfo文件中得到的hardware字段值。
+            selinux_initialize();
+                // setup seLinux
+            加载解析inti.rc
+                MSM_BOOT_MOEDE_FACTORY
+                MSM_BOOT_MODE_WLAN
+                MEM_BOOT_MODE_RF
+             parser.ParseConfig(START_SCRIPT_FILE_NORMAL);    
+                解析inti.rc 文件的每一个token
+                ParseLineSection()
+                    // 将解析出来的每一个action / service 添加到 action_->AddCommand(args, filename, line, err)
+                                                                 service_->HandleLine(args, err)
+            while(true)
+                am.ExecuteOneCommand()
+                循环执行 init.rc中的action 或者 service 
+            处理完成后，成为守护进程
+        recovery模式会执行的init.rc文件
+            /bootable/recovery/etc/init.rc
+            主要的启动的进程是
+                service recovery /sbin/recovery
+                    seclabel u:r:recovery:s0
+                源文件就是/bootable/recovery/recovery.cpp
+    recovery 进程
+        main()
+            redirect_sudio(TEMPORARY_LOG_FILE)    //用管道将标准输入输出重定向到/temp/recovery.log
+            load_volume_table();
+                根据 /etc/recovery.fstab 建立分区表
+            get_args(argc, argv)
+                先从BCB读取信息，如果没有从/cache/command读取，并写回去BCB（不明原因重启时，返回到recovery），recovery结束时，清除BCB
+                1 get_bootloader_message()：主要工作是根据分区的文件格式类型（mtd或emmc）从MISC分区中读取BCB数据块到一个临时的变量中。
+                2 然后开始判断Recovery服务是否有带命令行的参数（/sbin/recovery，根据现有的逻辑是没有的），若没有就从BCB中读取recovery域。如果读取失败则从/cache/recovery/command中读取然后。
+                    这样这个BCB的临时变量中的recovery域就被更新了。在将这个BCB的临时变量写回真实的BCB之前，又更新的这个BCB临时变量的command域为“boot-recovery”。
+                    这样做的目的是如果在升级失败（比如升级还未结束就断电了）时，系统在重启之后还会进入Recovery模式，直到升级完成。
+                3 在这个BCB临时变量的各个域都更新完成后使用set_bootloader_message()写回到真正的BCB块中。
+            
+            struct selinux_opt seopts[] = {{SELABEL_OPT_PATH, "/file_contexts"}};
+                设置selinux
+            
+            if (update_package)
+                当安装包是以CASHE:开头的，换成cache/开头            
+            
+            device_ui_init();   //Recovery服务使用了一个基于framebuffer的简单ui（miniui）系统。这个函数对其进行了简单的初始化。在Recovery服务的过程中主要用于显示一个背景图片（正在安装或安装失败）和一个进度条（用于显示进度）。
+                另外还启动了两个线程，一个用于处理进度条的显示（progress_thread），另一个用于响应用户的按键（input_thread）。
+            
+            arg = getopt_long(argv)  // 解析command，执行总清除、升级等相关操作
+            switch(arg)
+                case:    // 升级
+                //核心 安装 OTA 升级包
+                /bootable/recovery/install.cpp
+                install_package()
+                    dopen_path(install_file, "w");
+                        打开Log文件写入安装包路径
+                    if (setup_install_mounts()!= 0)
+                        mount /tmp和/cache
+                        ensure_path_mounted(v->mount_point)
+                    // 解密升级包
+                    pthread_create(&decrypt_thread, NULL, decrypt_thread_fn, const_cast<char*>(path));
+                    really_install_package(path, wipe_cache, needs_mount);
+                        执行安装
+                        ui->SetBackground(RecoveryUI::INSTALLING_UPDATE)    //设置背景
+                        ui->Print("Finding update package...")
+                        ui->SetProgressType(RecoveryUI::DETERMINATE)
+                        ui->ShowProgress(VERIFICATION_PROGRESS_FRACTION, VERIFICATION_PEOGERSS_TIME)     //显示进度条
+                        ui->Print("Opending update package---)
+                        
+                        if(path && needs_mount)
+                            ensure_path_mounted()    // 判断升级包路径是否被挂载
+                        sysMapFile(paht, &map)    //升级包映射到内存中
+                        load_keys(PUBLIC_KEYS_FILE, &numKeys);  // 加载升级包key
+                        verify_package(map.addr, map.length)    验证升级包/verify package
+                            load_keys(PUBLIC_KEYS_FILE, loadKeys)
+###                            verify_file(const_cast<unsigned char *>(package_data), package_size, loadKeys);        //校验
+                                /bootable/recovery/verifier.cpp
+                                verifySignature() [ verify the signature file: CERT.sf/rsa. ]
+                                    digestEntry():verifier.c [ get SHA-1 digest of CERT.sf file ]
+                                    RSA_verify(public key:keys.inc, signature:CERT.rsa, CERT.sf's digest):libc/rsa.c [ Verify a 2048 bit RSA PKCS1.5 signature against an expected SHA-1 hash. Use public key to decrypt the CERT.rsa to get original SHA digest, then compare to digest of CERT.sf ]
+                                verifyManifest() [ Get manifest SHA1-Digest from CERT.sf. Then do digest to MANIFEST.MF. Compare them ]
+                                verifyArchive() [ verify all the files in update.zip with digest listed in MANIFEST.MF ]
+                                
+                        mzOpenZipArchive(map.addr, map.length, &zip)    //try to open zip
+                            /bootable/recovery/minzip/Zip.c
+###                            parseZipAchive(pArchive)
+                            打开升级包，将相关信息存到ZipArchive数据机构中，便于后面处理。    
+                        
+                        设置update UI
+                        try_update_binary(path, &zip, wipe_data, log_buffer, retry_count);    //升级安装包，执行安装脚本
+                            /bootable/recovery/install.cpp                            
+                            read_source_target_build(zip, log_buffer)
+                                read_metadata_from_package(zip, &meta_data)
+                                    // Read the build.version.incremental of src/tgt from the metadata and log it to last_install.
+???                                    const ZipEntry* meta_entry = mzFindZipEntry(zip, METADATA_PATH);
+???                                        // 查找"META-INF/com/android/metadata"在update.zip中的位置;
+???                                    mzReadZipEntry(zip, meta_entry, &(*meta_data)[0], meta_entry->uncompLen)
+                                        
+                            // !AB_OTA_UPDATER
+                            update_binary_command()
+                                // On traditional updates we extract the update binary from the package.
+                                const ZipEntry* binary_entry = mzFindZipEntry(zip, ASSUMED_UPDATE_BINARY_NAME);
+                                    获取update.zip包中的update_binary程序的入口。
+                                binary = "/tmp/update_binary";
+                                mzExtractZipEntryToFile(zip, binary_entry, fd);
+                                     //把update.zip升级包中的binary_build程序拷贝到/tmp/update_binary
+                            // AB_OTA_UPDATER    
+!!!                            update_binary_command()                                
+### 升级脚本位置在哪里                        
+                            // Convert the vector to a NULL-terminated char* array suitable for execv
+                            for()
+                                const char * char_args[i] = args[i].c_str();
+                                
+                            pid_t pid = fork();
+                            if (pid == 0) {
+                                umask(022);
+                                close(pipefd[0]);
+                                execv(chr_args[0], const_cast<char **>(char_args));
+                                // 执行binary程序，程序binary实际上就是update.zip包中的update-binary。                                
+                                该程序的源码位置：
+                                /bootable/recovery/updater/updater.cpp
+###    升级安装包进程                    main(int argc, char ** argv)
+                                        函数参数检查和版本检查，当前函数版本支持 1 2 3 版本
+                                        
+                                        获取管道并打开，和父进程通信，更新UI。
+                                        int fd = atoi(argv[2]);
+                                        FILE* cmd_pipe = fdopen(fd, "wb");
+                                        setlinebuf(cmd_pipe);
+                                        
+                                        读取updater-script脚本：从update.zip包中将updater-script脚本读到一块动态内存中，供后面执行。
+                                        sysMapFile(package_filename, &map)
+                                        mzOpenZipArchive(map.addr, map.length, &za);
+                                        ota_io_inti(&za);
+找到updater_script位置                    mzFindZipEntry(&za, SCRIPT_NAME);  SCRIPT_NAME:"META-INF/com/google/android/updater-script"
+                                        fread(script, 1, st.st_size, script_file);
+                                        
+                                        Configure edify’s functions：注册脚本中的语句处理函数，即识别脚本中命令的函数。主要有以下几类
+                                        RegisterBuiltins()：注册程序中控制流程的语句，如ifelse、assert、abort、stdout等。
+                                                RegisterInstallFunctions()：实际安装过程中安装所需的功能函数，比如mount、format、set_progress、set_perm等等。
+                                        RegisterDeviceExtensions()：与设备相关的额外添加項，在源码中并没有任何实现。
+                                        FinishRegistration()：结束注册。
+                                        
+                                        Parsethe script：调用yy*库函数解析脚本，并将解析后的内容存放到一个Expr类型的python类中。
+                                            parse_string(script, &root, &error_count)。execute updater-script                    
+                                            6 执行脚本：核心函数是Evaluate()，它会调用其他的callback函数，
+                                                而这些callback函数又会去调用Evaluate去解析不同的脚本片段，从而实现一个简单的脚本解释器。
+                                            Evaluate(&state, root)
+                                                updater-script脚本语法
+                                                updater-script:
+                                        7 错误信息提示：最后就是根据Evaluate()执行后的返回值，给出一些打印信息。
+                                                                            
+                            }    
+                            FILE* from_child = fdopen(pipefd[0], "r");
+                            while (fgets(buffer, sizeof(buffer), from_child) != NULL)
+                                利用管道，获取执行脚本的的子进程执行状态，更新update界面(进度条)
+                    fputc(result == INSTALL_SUCCESS ? '1':'0', install_log)     // 将安装结果和安装时间写入Log
+                case:   // 清除
+                    wipe_data() / wipe_cache() / wipe_app_data() / wipe_reserve() 
+                case:   // 
+                    ~~~
+            if (status != INSTALL_SUCCESS) {
+                memset(&boot, 0, sizeof(boot));
+                set_bootloader_message(boot);
+                device_main_ui_show();//show menu
+            }
+            finish_recovery(send_intent);
+                1 将intent（字符串）的内容作为参数传进finish_recovery中。如果有intent需要告知Main System，则将其写入/cache/recovery/intent中。这个intent的作用尚不知有何用。
+                2 将内存文件系统中的Recovery服务的日志（/tmp/recovery.log）拷贝到cache（/cache/recovery/log）分区中，以便告知重启后的Main System发生过什么。
+                3 擦除MISC分区中的BCB数据块的内容，以便系统重启后不在进入Recovery模式而是进入更新后的主系统。
+                4 删除/cache/recovery/command文件。这一步也是很重要的，因为重启后Bootloader会自动检索这个文件，如果未删除的话又会进入Recovery模式。原理在上面已经讲的很清楚了。
+            if(1 == SAUUPdate) {
+                property_set(ANDROID_RB_PROPERTY, "reboot silence");
+            } else 
+                property_set(ANDROID_RB_PROPERTY, "reboot");
+            
+        return EXIT_SUCCESS;
+    升级脚本 
+    updater-script:
+        1.assert(condition)：如果condition参数的计算结果为False，则停止脚本执行，否则继续执行脚本。
+        2.show_progress(frac,sec)：frac表示进度完成的数值，sec表示整个过程的总秒数。主要用与显示UI上的进度条。
+        3.format(fs_type,partition_type,location)：fs_type，文件系统类型，取值一般为“yaffs2”或“ext4”。Partition_type，分区类型，一般取值为“MTD”或则“EMMC”。主要用于格式化为指定的文件系统。事例如下：format（”yaffs2”,”MTD”,”system”）。
+        4.mount(fs_type,partition_type,location,mount_point)：前两个参数同上，location要挂载的设备，mount_point挂载点。作用：挂载一个文件系统到指定的挂载点。
+        5.package_extract_dir(src_path,destination_path)：src_path，要提取的目录，destination_path目标目录。作用：从升级包内，提取目录到指定的位置。示例：package_extract_dir(“system”,”/system”)。
+        6.symlink(target,src1,src2,……,srcN)：target，字符串类型，是符号连接的目标。SrcX代表要创建的符号连接的目标点。示例：symlink(“toolbox”,”/system/bin/ps”),建立指向toolbox符号连接/system/bin/ps，值得注意的是，在建立新的符号连接之前，要断开已经存在的符号连接。
+        7.set_perm(uid,gid,mode,file1,file2,……,fileN)：作用是设置单个文件或则一系列文件的权限，最少要指定一个文件。
+        8.set_perm_recursive(uid,gid,mode,dir1,dir2,……,dirN)：作用同上，但是这里同时改变的是一个或多个目录及其文件的权限。
+        9.package_extract_file(srcfile_path,desfile_paht)：srcfile_path，要提取的文件，desfile_path，提取文件的目标位置。示例：package_extract_file(“boot.img”,”/tmp/boot.img”)将升级包中的boot.img文件拷贝到内存文件系统的/tmp下。
+        10.write_raw_image(src-image,partition)：src-image源镜像文件，partition，目标分区。作用：将镜像写入目标分区。示例：write_raw_image(“/tmp/boot.img”,”boot”)将boot.img镜像写入到系统的boot分区。
+        11.getprop(key)：通过指定key的值来获取对应的属性信息。示例：getprop(“ro.product.device”)获取ro.product.device的属性值。
+        
+             1 比较时间戳：如果升级包较旧则终止脚本的执行。
+             2 匹配设备信息：如果和当前的设备信息不一致，则停止脚本的执行。
+             3 显示进度条：如果以上两步匹配则开始显示升级进度条。
+             4 格式化system分区并挂载。
+             5 提取包中的recovery以及system目录下的内容到系统的/system下。
+             6 为/system/bin/下的命令文件建立符号连接。
+             7 设置/system/下目录以及文件的属性。
+             8 将包中的boot.img提取到/tmp/boot.img。
+             9 将/tmp/boot.img镜像文件写入到boot分区。
+             10 完成后卸载/system
+    
+    3 UI 绘制
+        Recovery UI 系统基于 FrameBuffer 来绘制界面。主要包括UI初始化、界面绘制显示、Input 事件派发处理等方面。
+        1 设备初始化：
+            在 Recovery.cpp 中通过调用 device_ui_init() 具体实现：
+            /oppo/src/main/oppo.c
+            main_ui_init()
+                oppo_ui_init();   //初始化acfg_var参数，注册函数
+                    acfg_init()
+                        acfg_var.winbg = ag_rgb(0xf2, 0xf2, 0xf2);  // 设置各种颜色
+                        acfg_var.winroundsz = 4;    // 设置各种形状边角形状
+                        acfg_var.new_text_gray = ag_rgb(0x69, 0x69, 0x69); //设置字体颜色
+                        acfg_var.ckey_up = 0;   // 初始化按键
+                    oppo_ui_register();
+                        RegisterFunction("init_set", OPPO_INI_SET);  //注册函数
+                        RegisterFunction("calibrate", OPPO_CALIBRAE);
+                ui_init();         //过滤出触屏和按键事件，创建处理事件的线程
+                    ev_init();
+                        aipInit(&event_filter);
+                            Dir* dir = opendir(AIP_DEVICE); // 打开输入设备 /dev/input下的evart 到 AIP_VARSP 结构体。
+                            滤掉accelerater，保证Recovery触摸不出现焦点乱跳的现象
+                             aipInitEventDev(&_aip->evs[_aip->n]); // 初始化虚拟按键
+                        pthread_create(&input_thread_t, NULL, ev_input_thread,NULL); // 创建线程实现输入事件回调处理
+                            while(evthread_active) {
+                                bytes res = aipGetInput(&ev, 500); // 获取事件：将输入装换为相应的事件
+                                ev_input_callback(&ev); // 回调处理输入的事件
+                                    ev_post_mesage(evtouch_code, evtouch_state);  // 输入事件插入消息队列
+                            }
+                ag_init();         //获取FrameBuffer设备信息，绘制标题栏及电池状态
+                    ag_fb = open(OPPO_FRAMEBUFFER, O_RDWR, 0); // framebuffer handler
+                    
+                    ioctl(ag_fb, FBIOGET_VSCREEDINFO, &ag_fbv); // 通过 IO 获取FBIOGET_VSCREEDINFO，保存到ag_fbv.
+                    ag_fbv.bits_per_pixel = 16; // 强制设置使用 RGB565 为UI的颜色格式
+                    ioctl(ag_fb, FBIOPUT_VSCREENINFO, &ag_fbv); // 在通过IO设置 FB 为RGB565
+                    
+                    ioctl(ag_fb, FBIOGET_FSCREENINFO, &ag_fbf);
+                    ag_canvas(&ag_c, ag_fbv.eres, ag_fbv.yres); // init 32 buffer
+                    // init Frame Buffer Size
+                    // init frame buffer
+                    
+                    // 与此同时新开 status_thread、refresh_thread 两个线程
+                    pthread_create(&status_pthread, NULL, status_thread, NULL);
+                        // 监测 usb / 充电器的充电操作，并触发更新电池UI
+                    pthread_create(&refresh_pthread, NULL, refresh_thread, NULL);
+                        // 刷新信号来绘制标题栏、电池、时间区域。
+                oppo_ui_start(); //设置背景大小，加载prop属性和png资源以及png字体格式
+                    // 设置 theme 字体、位图加载释放
+                tree_init();      //初始化各个显示节点
+                    
+            //根据区域选择显示语言（中文/英语）
+                char version[PROPERTY_VALUE_MAX];
+                persist_property_get("persist.sys.oppo.region",version,"CN");
+                if(strcmp(version, "CN") == 0)
+                    oppo_loadlang("langs/cn.lang");  //加载中文
+                else
+                    oppo_loadlang("langs/en.lang");  //加载英语
+                return RET_OK;
+        2 显示UI
+            device_main_ui_show()
+                // 调用各个节点的 show 方法显示各个节点的界面
+        3. Input事件派发及处理
+            3.1 Input事件获取
+                通过atouch_wait_ex()从消息队列中取出msg，并将其转换成按键和触摸事件返回。
+                int atouch_wait_ex(ATEV *atev, byte calibratingtouch){  
+                  while (1){
+                    int key = ui_wait_key();
+
+                    //-- Custom Message
+                    if (key==atouch_message_code){
+                      atev->msg = atouch_winmsg_get(1);  ////取出atouch_winmsg[0] 
+                    
+                    if (key==evtouch_code){
+                      if ((evtouch_x>0)&&(evtouch_y>0)){
+                        atev->x = evtouch_x;
+                        atev->y = evtouch_y;
+                        switch(evtouch_state){
+                          case 1:  return ATEV_MOUSEDN; break;
+                          case 2:  return ATEV_MOUSEMV; break;
+                          default: return ATEV_MOUSEUP; break;
+                        }
+                      }
+                    }
+                    else if ((key!=0)&&(key==acfg()->ckey_up))      return ATEV_UP;
+                    else if ((key!=0)&&(key==acfg()->ckey_down))    return ATEV_DOWN;
+                    else if ((key!=0)&&(key==acfg()->ckey_select))  return ATEV_SELECT;
+                    else if ((key!=0)&&(key==acfg()->ckey_back))    return ATEV_BACK;
+                    else if ((key!=0)&&(key==acfg()->ckey_menu))    return ATEV_MENU;
+                  
+                  return 0;
+                }
+            3.2 消息派发及处理
+            消息重构函数为：
+                #define aw_msg(m,d,l,h) ((dword)((((h)&0xff)<<24)|(((l)&0xff)<<16)|(((d)&0xff)<<8)|((m)&0xff)))
+                    其中m为区别各控件自定义值，d表示是否需要绘制，l表示维持焦点。
+            对于转换后消息action，主要分为ATEV_MESSAGE、ATEV_BACK、ATEV_DOWN、ATEV_UP、ATEV_SELECT、ATEV_MOUSEDN、ATEV_MOUSEUP、ATEV_MOUSEMV等几类，针对每一类都交由各个ACONTROLP内部进行逻辑处理。
+            /oppo/src/controls/oppo_controls.c
+            aw_dispatch()   // 派发消息
+                while(1) {
+                    int action  =atouch_wait(&atev);
+                    switch(action) {
+                        case:
+                        case:
+                        case:
+                    }
+                }
+
+    
+
+参考文章：
+http://blog.csdn.net/mu0206mu/article/details/7399822

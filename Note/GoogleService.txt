@@ -1,0 +1,8 @@
+GMS
+    GMS全称为Google Mobile Service，即谷歌移动服务。GMS是Google开发并推动。
+    GMS目前提供有Search、Search by Voice、Gmail、Contact Sync、Calendar Sync、Talk、Maps、Street View、YouTube、Android Market(ICS上更改为Play store)服务。
+    CTS: Compatibility Test Suite 兼容性测试
+    GTS: Google Mobile Service Test Suite (GMS套件测试)是用于GMS应用的测试的自动化的测试套件
+    CAT: CTS Audio Verifier Test 录音放音音质测试
+    CTS Verifier: 手动测试软件,google提供的一系列软件测试来检测系统的稳定性.
+    

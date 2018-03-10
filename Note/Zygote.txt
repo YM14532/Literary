@@ -1,0 +1,25 @@
+init 进程会启动系统很多服务，包括neted, surfaceflinger, media, installed, bootanim, serviceManager, zgote
+ServiceManager 启动分析
+	
+Zygote 启动分析：创建虚拟机，按照参数启动zygote
+	app_process(); 
+	AndroidRuntime.start("com.android.internal.os.ZygoteInit","start-system-server");
+		startvm(); 创建虚拟机
+		startReg(); 注册JNI
+		CallStaticVoidMethod(); 启动服务
+			registerZygoteSocket(); //创建socket 和 AMS 通信
+			preload()
+				preloadCladd(); // 目标类,android原生类
+				preloadResources();	// 系统资源
+				preloadOpenGL();	// 硬件加速
+			startSystemServer();	// 启动systemServer
+				Zygote.forkSystemServer();	//创建子进程
+				handleSystemServerProcess(); // 创建system_server
+				zygooteInit();applicationInit();//会生成一个异常类，这个异常类就会通过我们的invokeStaticMain，来把它剖出来，剖出来之后，我们的子进程就会根据这个异常去创建我们的system_server服务
+				invokeStaticMain(); // 创建服务
+			runSelectLoop();	//接受处理消息
+zygote 启动应用：
+	runSelectLoop()
+	selectReadable()
+	acceptCommandPeer()
+	runOnce()

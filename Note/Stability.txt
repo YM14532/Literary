@@ -1,0 +1,145 @@
+Dropbox 功能：
+    开机会启动 DropboxManagerService 服务，当发生以下错误的时候，就会调用AMS.addErrorToDropBox()来触发DBMS工作。形成 Dropbox 的日志。
+    crash: AMS.handleApplicationCrashInner过程 
+    anr: AMS.appNotResponding()过程； 
+    watchdog: Watchdog.run()过程; 
+    native_crash: NativeCrashReporter.run()的过程; 
+    wtf: 当调用Log.wtf()或者Log.wtfQuiet()的过程； 
+    lowmem: 当内存较低时，触发AMS.reportMemUsage()过程；
+
+老化问题
+    1 system_server crash
+        打开log, 找到 dropbox/system_server_crash@XXXXXXX(时间戳).txt，打开日志，一般第一个就是 system_server 进程 crash 时的调用堆栈信息，按照提示的 Exception 类型，分析源码。
+FeedBack
+    1 868123039929212_1_SYSTEM_SERVER@1517501104383.txt 文件，打开直接可以看到错误原因。
+    2 log 可以直接看到 trace 分析 trace 就可以了。
+
+红屏
+    按照红屏截屏的提示，anr、crash、wtf。按照各自思路去分析。
+TombStone
+    native 程序执行的时候，系统会注册一些链接到 debuggerd 的 signal handlers. 当系统 crash 的时候，会保存一个 tombstone 文件到 /data/tombstone, 文件记录程序死亡时候基本信息（进程号，线程号，死亡地址，以及现场堆栈情况）。
+    --------- beginning of crash
+    --------- endding of crash
+        ABI: 'arm64'
+        pid: 2348, tid: 2463, name: android.anim  >>> system_server <<<  // pid != tid 的时候，说明错误出现在子线程，相等时，出现在主线程
+        signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0   //  signal 信号：含义。定义在这个位置：prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.11-4.8/sysroot/usr/include/bits/signum.h
+            Signal	Description
+            SIGSEGV	Invalid memory reference.
+            SIGBUS	Access to an undefined portion of a memory object.
+            SIGFPE	Arithmetic operation error, like divide by zero.
+            SIGILL	Illegal instruction, like execute garbage or a privileged instruction
+            SIGSYS	Bad system call.
+            SIGXCPU	CPU time limit exceeded.
+            SIGXFSZ	File size limit exceeded.
+        详细见附录：Signal 信号表 
+        Cause: null pointer dereference
+    backtrace 
+    
+    借助工具可以更好的分析
+    addr2line
+        addr2line -e -f libc.so 0001173c
+        objdump -S -D libc.so > deassmble_libc.txt      // 反汇编
+    ndk-stack
+        这个工具能自动分析 tombstone 文件, 能将崩溃时的调用内存地址和 c++ 代码一行一行对应起来.
+        调试 android 源码：adb shell logcat | ndk-stack -sym out/debug/target/product/XXXX/symbols/system/lib/xxx.so 直接调试 log 中的 crash 信息。
+    stack.py
+        stack.py工具就是要把backtrace通过addr2line工具一次性把addr对应到代码
+        用法：python stack.py --symbols-dir=out/target/profuct/XXX/sysbols/  tombstone-00(tombstone文件)
+        
+dumpsys 采用了binder机制调用了服务里的dump方法
+
+dupm 内存
+    ps | busybox grep socketcomm
+    cat /proc/上一步得到的pid/maps | busybox grep libsocket // 获得进程的虚拟内存的起始地址，用于 memdump 的参数。
+    memdump // 查看命令调用格式: memdump pid start_addr end_addr filename // 把内存导出来为 filename
+    readelf -h filename : 读取内存内容。
+
+第三方稳定性
+    OOM 
+    加固
+    红屏：按照 红屏 问题分析方法分析
+    
+watchdog 
+
+trace 
+
+log 机制
+
+
+
+
+附录：
+
+log 标签
+    常用tag
+        am_low_memory：位于AMS.killAllBackgroundProcesses或者AMS.appDiedLocked，记录当前Lru进程队列长度。
+        am_pss：位于AMS.recordPssSampleLocked(
+        am_meminfo：位于AMS.dumpApplicationMemoryUsage
+        am_proc_start:位于AMS.startProcessLocked，启动进程
+            am_proc_start (User|1|5),(PID|1|5),(UID|1|5),(Process Name|3),(Type|3),(Component|3)
+        am_proc_bound:位于AMS.attachApplicationLocked
+        am_kill: 位于ProcessRecord.kill，杀掉进程
+        am_anr: 位于AMS.appNotResponding
+        am_crash:位于AMS.handleApplicationCrashInner
+        am_wtf:位于AMS.handleApplicationWtf
+        am_activity_launch_time：位于ActivityRecord.reportLaunchTimeLocked()，后面两个参数分别是thisTime和 totalTime.
+        am_activity_fully_drawn_time:位于ActivityRecord.reportFullyDrawnLocked, 后面两个参数分别是thisTime和 totalTime
+        am_broadcast_discard_filter:位于BroadcastQueue.logBroadcastReceiverDiscardLocked
+        am_broadcast_discard_app:位于BroadcastQueue.logBroadcastReceiverDiscardLocked
+        power_sleep_requested: 位于PMS.goToSleepNoUpdateLocked
+        power_screen_state:位于Notifer.handleEarlyInteractiveChange, handleLateInteractiveChange
+        battery_level: [19,3660,352] //剩余电量19%, 电池电压3.66v, 电池温度35.2℃
+        power_screen_state: [0,3,0,0] // 灭屏状态(0), 屏幕超时(3). 当然还有其他设备管理策略(1),其他理由都为用户行为(2)
+        power_screen_state: [1,0,0,0] // 亮屏状态(1)
+    
+    activity 声明周期
+        am_on_resume_called: 位于AT.performResumeActivity
+        am_on_paused_called: 位于AT.performPauseActivity, performDestroyActivity
+        am_resume_activity: 位于AS.resumeTopActivityInnerLocked
+        am_pause_activity: 位于AS.startPausingLocked
+        am_finish_activity: 位于AS.finishActivityLocked, removeHistoryRecordsForAppLocked
+        am_destroy_activity: 位于AS.destroyActivityLocked
+        am_focused_activity: 位于AMS.setFocusedActivityLocked, clearFocusedActivity
+        am_restart_activity: 位于ASS.realStartActivityLocked
+        am_create_activity: 位于ASS.startActivityUncheckedLocked
+        am_new_intent: 位于ASS.startActivityUncheckedLocked
+        am_task_to_front: 位于AS.moveTaskToFrontLocked
+
+Signal 信号表 :
+    /* Signals.  */  
+    #define SIGHUP      1   /* Hangup (POSIX).  */   
+    #define SIGINT      2   /* Interrupt (ANSI).  */   
+    #define SIGQUIT     3   /* Quit (POSIX).  */   
+    #define SIGILL      4   /* Illegal instruction (ANSI).  */   
+    #define SIGTRAP     5   /* Trace trap (POSIX).  */   
+    #define SIGABRT     6   /* Abort (ANSI).  */   
+    #define SIGIOT      6   /* IOT trap (4.2 BSD).  */   
+    #define SIGBUS      7   /* BUS error (4.2 BSD).  */   
+    #define SIGFPE      8   /* Floating-point exception (ANSI).  */   
+    #define SIGKILL     9   /* Kill, unblockable (POSIX).  */   
+    #define SIGUSR1     10  /* User-defined signal 1 (POSIX).  */   
+    #define SIGSEGV     11  /* Segmentation violation (ANSI).  */   
+    #define SIGUSR2     12  /* User-defined signal 2 (POSIX).  */   
+    #define SIGPIPE     13  /* Broken pipe (POSIX).  */   
+    #define SIGALRM     14  /* Alarm clock (POSIX).  */   
+    #define SIGTERM     15  /* Termination (ANSI).  */   
+    #define SIGSTKFLT   16  /* Stack fault.  */   
+    #define SIGCLD      SIGCHLD /* Same as SIGCHLD (System V).  */   
+    #define SIGCHLD     17  /* Child status has changed (POSIX).  */   
+    #define SIGCONT     18  /* Continue (POSIX).  */   
+    #define SIGSTOP     19  /* Stop, unblockable (POSIX).  */   
+    #define SIGTSTP     20  /* Keyboard stop (POSIX).  */   
+    #define SIGTTIN     21  /* Background read from tty (POSIX).  */   
+    #define SIGTTOU     22  /* Background write to tty (POSIX).  */   
+    #define SIGURG      23  /* Urgent condition on socket (4.2 BSD).  */   
+    #define SIGXCPU     24  /* CPU limit exceeded (4.2 BSD).  */   
+    #define SIGXFSZ     25  /* File size limit exceeded (4.2 BSD).  */   
+    #define SIGVTALRM   26  /* Virtual alarm clock (4.2 BSD).  */   
+    #define SIGPROF     27  /* Profiling alarm clock (4.2 BSD).  */   
+    #define SIGWINCH    28  /* Window size change (4.3 BSD, Sun).  */   
+    #define SIGPOLL     SIGIO   /* Pollable event occurred (System V).  */   
+    #define SIGIO       29  /* I/O now possible (4.2 BSD).  */   
+    #define SIGPWR      30  /* Power failure restart (System V).  */   
+    #define SIGSYS      31  /* Bad system call.  */   
+    #define SIGUNUSED   31  
+

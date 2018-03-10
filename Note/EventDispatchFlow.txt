@@ -1,0 +1,434 @@
+ANDROID_EVENT 机制
+    用户事件采集分发
+    WindowManagerService
+        窗口绘制
+        动画-Activity切换动画
+        Z-order的维护，activity窗口显示前后顺序
+        输入法管理
+        token管理
+        系统消息收集线程
+        系统消息分发线程
+    WindowManagerService 和 inputManagerService 在systemServer中建立
+    ServiceManager.addService(Context.WINDOW_SERVICE, wm);
+    ServiceManager.addService(Context.INPUT_SERVICE, inputManager);
+    ···
+    inputManager.start();
+    
+    /base/services/java/com/android/server/InputManagerService.java 
+    构造函数
+        this.mHandler = new InputManagerHandler(DisplayThread.get().getLooper());    // 将DisPlayThread的Looper传递过去。
+            DisplayThread是单例模式，启动唯一线程，该类继承HandleThread，实现Looper循环机制。
+            只能被WindowManager、DisplayManager、InputManager用来执行快速实时的显示。
+        mPtr = nativeInit(this, mContext, mHandler.getLooper().getQueue());     // 调用JNI，实现MessageQueue
+        /base/services/core/jni/com_android_server_input_InputManagerService.cpp
+        nativeInit()
+            NativeInputManager* im = new NativeInputManager(contextObj, serviceObj, messageQueue->getLooper());    // 将java层的MesageQueue 变成C++的。
+                构造nativeInputManager对象，最后将指针返回给java层。
+                sp<EventHub> eventHub = new EventHub();
+                mInputManager = new InputManager(eventHub, this, this);
+                /native/services/inputflinger/InputManager.cpp     
+                    构造函数
+                    mDispatcher = new InputDispatcher(dispatcherPolicy);
+                    mReader = new InputReader(eventHub, readerPolicy, mDispatcher); // 这一步会创建一个dispatcher负责分发输入事件，一个reader负责获取事件。
+                    mReaderThread = new InputReaderThread(mReader);
+                    mDispatcherThread = new InputDispatcherThread(mDispatcher); // 这里会创建两个线程，在以后的步骤中会用来运行前面创建的dispathcer和reader。
+    start(); // 负责启动service
+        // 这里首先调用了c++层的nativeStart，然后InputManagerService将自己交给Watchdog监视。然后注册了PointerSpeedSetting和ShowTouchesSetting两个Observer。
+        nativeStart(mPtr);
+            frameworks/base/services/core/jni/com_android_server_input_InputManagerService.cpp 
+                // 这一步将传来的ptr参数转化为一个NativeInputManager指针，同时开始启动 NativeInputManager 中的InputManager
+                NativeInputManager* im = reinterpret_cast<NativeInputManager*>(ptr);
+                status_t result = im->getInputManager()->start();    // 开始运行之前创建的dispatcherThread 和 mReadThread线程，开始读取分发event.
+                        /native/services/inputflinger/InputManager.cpp  // 开启分发线程
+                        status_t result = mDispatcherThread->run("InputDispatcher", PRIORITY_URGENT_DISPLAY);    // 启动dispatchThread
+                            threadLoop();
+                                dispatchOnce();
+                                    if(!haveCommandsLocked)
+                                        dispatchOnceInnerLocked(&nextWakeupTime);    // 如果没有command要执行的话，直接去获取事件，并且设置苏醒时间 。
+                                    runCommandsLockedInterruperible();
+                                    nextWakeupTime = LONG_LONG_MIN;            // 执行缓存的commands, 并且设置苏醒时间为LONG_LONG_MIN，因为执行commands中可能会有事件产生
+                                    timeoutLillis = toMilliseconsTimeoutDelay(currentTIme, nextWakeupTime, nextWakeupTime); 
+                                    mLooper->pollOnce(timeoutMillis); // 计算睡眠时间，通过pollOnce进入睡眠。
+                                    system/core/libutils/Looper.cpp
+                                        pollInner();
+                                            eventCount = epoll_wait(); //这里会调用epoll_wait函数，使其在mEpollFd所描述的epoll上等待一段时间，这个epoll监听着文件描述符的读写事件。如果有人在pip中写入，则会返回，否则等待指定时间后返回。
+                        // 开启readThread                    
+                        result = mReaderThread->run("InputReader", PRIORITY_URGENT_DISPLAY);
+                            threadLoop();
+                                loopOnce();
+                                    size_t count = mEventHub->getEvents(timeoutMillis, mEventBuffer, EVENT_BUFFER_SIZE);    // 从EventHub中获取事件
+                                    /framework/native/services/inputflinger/EventHub.cpp @ getEvent()
+                                         for(;;){
+                                            if(nNeedToReopenDevices){
+                                                closeAllDevices();    //    如果需要重新打开设备，那么就需要关闭全部设备
+                                                mNeedToScanDevices = true;
+                                            }
+                                         }
+                                        while(mClosingDevices){
+                                            delete device; // 删除释放链表的形式，删除所有的关闭的设备
+                                            nNeedToSendFinishedDevices = true; 
+                                        }
+                                        if(mNeedToScanDevices){
+                                            scanDevicesLocked();    // 如果关闭了设备，那么需要重新扫描
+                                            mNeedToSendFinishedDeviceScan = true;
+                                        }
+                                        while(mOpeningDevices != NULL){
+                                            链表的方式添加设备
+                                            mNeedToSendFinishedDeviceScan = true;
+                                        }
+                                        if(mNeedToSendFinishedDeviceScan){
+                                            
+                                        }
+                                        //以上步骤主要是负责重新获取接入的设备，下面将会负责获得设备中的event
+                                        
+                                        // 循环获取所有等待事件
+                                        while(mPendingEventIndex < mPendingEventCount){
+                                            const struct epoll_event & eventItem = mPendingEventItems[mPendingEventIndex++];
+                                            if(eventItem.data.u32 == EPOLL_IN_INOTIFU) { // 如果是一个INotify事件
+                                                if(eventItem.event & EPOLLIN)
+                                                    mPendingNotify = true;
+                                                continue;
+                                            }
+                                            if (event.data.u32 == EPOLL_ID_WAKE){    // 则读出mWakeReadPipeFd的数据，让等待在这个文件描述符上的线程得到唤醒
+                                                awoken = true;
+                                                do {
+                                                    nRead = read(mWakeReadPipeFd, buffer, sizeof(buffer));
+                                                } while ((nRead == -1 && errno == EINTR) || nRead == sizeof(buffer));
+                                                
+                                            }
+                                            
+                                            // 处理非特殊的事件
+                                            ssize_t deviceIndex = mDevices.indexOfKe(eventItem.data.u32); // 获取event 设备编号
+                                            Device * device = mDevices.valueAt(deviceIndex);
+                                            if (eventItem.event & EPOLLIN) {
+                                                int32_t readSize = read(device->fd, readBuffer, sizeof(input_event)*capacity); //读取数据到buffer
+                                            } else {
+                                                // 键盘事件的id 特殊处理
+                                                deviceId = device->id = mBuildInkeyboarId ? 0 : device->id;
+                                                size_t count = size_t(readSize) / sizeof(struct input_event);
+                                                for(i = 0; i < count; i++) {    // 循环取event
+                                                    struct input_event & iev = readBuffer[i];
+                                                    event-deviceId = deviceid;
+                                                    ...
+                                                    获取的事件存入event
+                                                }
+                                            }
+                                            
+                                            
+                                        }
+                                        //到这里说明pending event已经处理完，或者buffer已经塞满。buffer塞满或者存了一些事件，则退出最外层填充buffer的循环
+                                        // Return now if we have collected any events or if we were explicitly awoken.
+                                        if (event != buffer || awoken) {
+                                            break;
+                                        }
+
+                                        //这里处理了一些wake lock的事情，省略
+                                        //...
+
+                                        //到这一步说明buffer里没有填任何事件，同时也没有pending event
+                                        //所以需要等待有人向device文件描述符里写入一些事件
+                                        int pollResult = epoll_wait(mEpollFd, mPendingEventItems, EPOLL_MAX_EVENTS, timeoutMillis);
+
+                                        //时间已到，还是没有事件，那咱就结束吧
+                                        if (pollResult == 0) {
+                                            // Timed out.
+                                            mPendingEventCount = 0;
+                                            break;
+                                        }
+                                        //出错了，让我睡一会，下次再尝试
+                                        if (pollResult < 0) {
+                                            // An error occurred.
+                                            mPendingEventCount = 0;
+
+                                            // Sleep after errors to avoid locking up the system.
+                                            // Hopefully the error is transient.
+                                            if (errno != EINTR) {
+                                                ALOGW("poll failed (errno=%d)\n", errno);
+                                                usleep(100000);
+                                            }
+                                        } else {
+                                            // Some events occurred.
+                                            mPendingEventCount = size_t(pollResult);
+                                            //获取了一些event，那么继续循环，填充buffer！
+                                        }
+                                    
+                            
+                                        // All done, return the number of events we read.
+                                        return event - buffer;
+                                    }
+                                                                        
+        // Add ourself to the Watchdog monitors.
+        Watchdog.getInstance().addMonitor(this);
+        registerPointerSpeedSettingObserver();
+        registerShowTouchesSettingObserver();
+    
+InputChannel 过程
+    inputManager 可以获得event的输入并且分发，activity 和 inputManager 之间通过InputChannel 进行连接
+    activity 在创建的时候会将自己的DecorView 设置给对应的ViewRootImpl.
+    /base/core/java/android/view/ViewRootImpl.java
+    public void setView(View view, WindowManager.LayoutParams attrs, View panelParentView) 
+        synchronized(this);    // 同步
+        mView = view;
+        //新建InputChannel
+        if ((mWindowAttributes.inputFeatures
+                & WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL) == 0) {
+            mInputChannel = new InputChannel();
+        }
+        try {
+            mOrigWindowType = mWindowAttributes.type;
+            mAttachInfo.mRecomputeGlobalAttributes = true;
+            collectViewAttributes();
+            //mWindowSession是一个Binder代理对象
+            //它引用了运行在WindowManagerService中的一个类型为Session的Binder本地对象
+            //向WindowManagerService添加正在启动的Activity的窗口
+            //这里还会将InputChannel传递过去
+            res = mWindowSession.addToDisplay(mWindow, mSeq, mWindowAttributes,
+                  getHostVisibility(), mDisplay.getDisplayId(),
+                  mAttachInfo.mContentInsets, mAttachInfo.mStableInsets,
+                  mAttachInfo.mOutsets, mInputChannel);
+                这里会将传入的Window存入Map来进行统一管理，同时创建了一对server/client端的InputChannel。
+                frameworks/base/services/core/java/com/android/server/wm/WindowManagerService.java
+                    @ addWindow(Session seession, IWindow client, inseg, WindowManeger.Layout Params attrs, int viewVisibility, int displayId)
+                    检查添加的窗口
+                    final WindowState win = new WindowState(this, session, client, token, parentWindow,
+                        appOp[0], seq, attrs, viewVisibility, session.mUid,
+                        session.mCanAddInternalSystemWindow);  // 创建WindowState 对象
+                    if (outInputChannel != null && (attrs.inputFeatures
+                            & WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL) == 0) {
+                        String name = win.makeInputChannelName();
+                        //创建了一个InputChannel对，
+                        InputChannel[] inputChannels = InputChannel.openInputChannelPair(name);
+                            /base/core/java/android/view/InputChannel.java 
+                            nativeOpenInputChannelPair()
+                                frameworks/base/core/jni/android_view_InputChannel.cpp 
+                                android_view_InputChannel_nativeOpenInputChannelPair(JNIEnv * env, jclassclazz, jstring nameObj);
+                                    const char * nameChars = env0>GerStringUTFChars(nameObj, NULL);
+                                    String8 name(nameChars);
+                                    env->ReleaseStringUTFChars(nameObj, nameChars);  // java string -> char *
+                                    
+                                    sp<InputChannel> serverChannel;
+                                    sp<InputChannel> clientChannel;    //创建C++ 层的两个channel
+                                    status_t result = InputChannel::openInputChannelPair(name, serverChannel, clientChannel); // 创建channel
+                                        /framework/native/libs/native/InputTrancport.cpp
+                                        int sockets[2];
+                                        // socketpair 建立的是一套可以双向通信的管道，创建一对套接字描述符
+                                        if (socketpair(AF_UNIX, SOCKET_SEQPACKET, 0, sockets));    //socketpair创建了一对无名的套接字描述符（只能在AF_UNIX域中使用），描述符存储于一个二元数组s[2] .这对套接字可以进行双工通信，每一个描述符既可以读也可以写。这个在同一个进程中也可以进行通信，向s[0]中写入，就可以从s[1]中读取（只能从s[1]中读取），也可以在s[1]中写入，然后从s[0]中读取；但是，若没有在0端写入，而从1端读取，则1端的读取操作会阻塞，即使在1端写入，也不能从1读取，仍然阻塞；反之亦然
+                                            outServerChannel.clear();
+                                            outClientChannel.clear();
+                                        // 设置套接字缓存大小
+                                        setsocopt(sockets[0], SOL_SOCKET, SO_SENDUF, &buffersize, sizeof(fuffersize));
+                                        setsocopt(sockets[0], SOL_SOCKET, SO_RCVBUF, &buffersize, sizeof(buffersize));
+                                        setsocopt(sockets[1], SOL_SOCKET, SO_SENDUF, &buffersize, sizeof(fuffersize));
+                                        setsocopt(sockets[1], SOL_SOCKET, SO_RCVBUF, &buffersize, sizeof(buffersize));
+                                        // 开始new 两个InputChannel
+                                        String8 servreChannelName = name;
+                                        serverChannel.append("(server)");
+                                        outServerChannel = new InputChannel(serverChannelName, sockets[0]);
+                                            int result = fcntl(mFd, F_SETFL, O_NONBLOCK);
+                                        ...
+                                        
+                                    jobjectArray chanelPair = env->NewObjArray(2, gInputChannelClassInfo.clazz, NULL);
+                                    jobject serverChannelObj = android_InputChannel_createInputChannel(env, new NativeInputChannel(serverChannel);
+                                    jobject clientChannelObj = android_view_InputChannel_createInputChannel(env, new NativeInputChannel(clientChannel);                                    
+                        
+                        win.setInputChannel(inputChannels[0]);//一个放在WindowState里作为server端的InputChannel
+                        inputChannels[1].transferTo(outInputChannel);//一个转化为client传递过来的outInputChannel
+                        //从上一篇文章中的1.1可知，InputManager作为参数传入
+                        //WindowManagerService的构造函数，并且存放在mInputManager中
+                        //下面章节会详细讲述如何注册server端的InputChannel
+                        mInputManager.registerInputChannel(win.mInputChannel, win.mInputWindowHandle);
+                            nativeRegisterInputChannel(mPtr, inputChannel, inputWindowHandle, monitor:false);
+                            /framework/base/services/core/jni/com_android_serve_input_InputManagerService.cpp
+                                    //将指针转化为NativeInputManager
+                                    NativeInputManager* im = reinterpret_cast<NativeInputManager*>(ptr);
+                                    //将java的InputChannel对象转化为一个c++层的InputChannel对象
+                                    sp<InputChannel> inputChannel = android_view_InputChannel_getInputChannel(env,
+                                            inputChannelObj);
+                                    //将InputWindowHandle转化为c++层的InputWindowHandler
+                                    sp<InputWindowHandle> inputWindowHandle =
+                                            android_server_InputWindowHandle_getHandle(env, inputWindowHandleObj);
+
+                                    //将注册任务交给NativeInputManager
+                                    status_t status = im->registerInputChannel(env, inputChannel, inputWindowHandle, monitor);
+                                        mInputManager->getDispatcher()->registerInputChannel(
+            inputChannel, inputWindowHandle, monitor);    // server端的inputChannel 交给了inputDispatcher.
+                                            frameworks/native/services/inputflinger/InputDispatcher.cpp :
+                                                    AutoMutex _l(mLock);
+                                                    //判断是否该InputChannel已经添加过
+                                                    if (getConnectionIndexLocked(inputChannel) >= 0) {
+                                                        ALOGW("Attempted to register already registered input channel '%s'",
+                                                                inputChannel->getName().string());
+                                                        return BAD_VALUE;
+                                                    }
+                                                    //创建一个Connection
+                                                    sp<Connection> connection = new Connection(inputChannel, inputWindowHandle, monitor);
+
+                                                    //获得InputChannel的文件描述符
+                                                    int fd = inputChannel->getFd();
+                                                    //将Connection 以文件描述符为关键字，添加入m
+                                                    mConnectionsByFd.add(fd, connection);
+
+                                                    //..
+                                                    //将文件描述符添加Looper，让Looper监控InputChannel的IO事件
+                                                    //当IO事件发生时，就会调用回调函数handleReceiveCallback
+                                                    mLooper->addFd(fd, 0, ALOOPER_EVENT_INPUT, handleReceiveCallback, this);
+                                                    //到这一步，InputDispatcher已经将InputChannel的Server端管理起来了。当Dispatcher将一个事件通过Channel发送给应用程序窗口以后，会进入休眠状态，直到应用窗口再次通过这个Channel返回一个消息将其激活，Dispatcher才准备发送下一个消息。
+                                                    这里创建的Connection，Connection中又创建了InputPublisher。InputPublisher可以直接将消息通过这个InputChannel发送出去。    
+                    }                        
+                    // From now on, no exceptions or errors allowed!
+                    //将win放入mWindowMap，以client的binder为关键字
+                    mWindowMap.put(client.asBinder(), win);
+                    //将win加入相应的list，省略..        
+                    mInputMonitor.setUpdateInputWindowsNeededLw();
+        }
+----client 端注册InputChannel
+        mInputEventReceiver = new WindowInputEventReceiver(mInputChannel, Looper.myLooper());
+        /framework/base/core/java/android/view/InputEventReceiver.java
+            mInputChannel = inputChannel'
+            mMessageQueue = looper.getQueue();
+            mReceiverPrt = nativeInit(new WeakReference<InputEvnetReveiver>(this), inputChannel, mMessageQueue);
+                /fw/base/core/jni/android_view_InputEventReveiver.cpp
+                sp<InputChannel> inpucChannel = android_view_InputChannel_getInputChannel(env, inputChannelObj);  // java对象变为c++对象
+                sp<MessageQueue> messageQueue = andorid_os_MessageQueue_getMessageQueu(env, messageQueueObj);//java messageQueue -> C++
+                sp<NativeInputEventReceiver> receiver = new NativeInputEventReceiver(env, receiveWeak, inputChannel, mesageQueue); //创建NativeInputEventReceiver
+                    
+                status_t status = receiver->initialize();    // 初始化 
+                    setFdEvents(ALOOPER_EVENT_INPUT);
+                        if (mFdEvents != events) {
+                            mFdEvents = events;
+                            int fd = mInputConsumer.getChannel()->getFd(); //获取Channel的文件描述符
+                            if (events) {
+                            //获取Looper，给其添加监听fd的IO事件的请求
+                            //MessageQueue的Looper为主线程Looper，如果Looper进入睡眠
+                            //则会被Channel上写入的事件唤醒，从而可以处理新来的消息
+                                mMessageQueue->getLooper()->addFd(fd, 0, events, this, NULL);
+                        } else {
+                                mMessageQueue->getLooper()->removeFd(fd);
+                        }
+                                    
+向InputManagerService注册当前激活的应用程序窗口
+    到这里，InputDispatcher获取了和激活的Window的双向通信通道，同时Dispatcher也知道了是哪个Window处于Focused状态。
+    只要Client端将通信通道建立完毕，则Dispatcher可以向Activity的Window发送消息了。
+Client端注册InputChannel
+    
+Input 消息分发过程--InputReader 
+    //http://blog.csdn.net/tianchi92/article/details/52661590
+    
+ANDROID_MESSAGE消息机制：                
+1 消息循环：android 应用程序再启动之后，进程中会加载 activityThread 类，执行main函数，应用程序的消息循环实现在main函数中。
+    framework/base/core/java/android/app/AcitvityThread.java
+    1  创建 ActivityThread 类实例
+        ActivityThread thread = new ActivityThread();
+        thread.attach(false);
+    2 通过 Looper 主线程进入消息循环
+        /base/core/java/android/os/Looper.java
+            初始化Looper，完成如下调用
+            prepareMainLooper()
+                在线程中创建一个looper对象，这个Looper对象存在于局部变量 sThreadLocal 中, 保证每一个调用该函数的线程里面都有一个独立的
+                    Looper 对象，同时创建一个 MessageQueue 队列，保存在Looper的成员变量 MQueue 中。
+                    /android/os/MessageQueue.java
+                    nativeInit();  // 初始化调用JNI实现 /base/core/jni/android_os_MessageQueue.cpp
+                        调用jni的时候，在JNI层也实现了一个Looper对象，和上层java层对应。 
+                        /base/libs/utils/Looper.cpp 
+                            int wakeFds[2];
+                            int result = pipe(wakeFds);        
+                            mWakeReadPipeFd = wakeFds[0];
+                            mWakeWritePipeFd = wakeFds[1];    // 创建管道 读写消息队列
+                            
+                            mEpollFd = epoll_create(EPOLL_SIZE_HINT);  // 为了实现管道的等待唤醒机制，使用epoll机制，参数表示mEpollFd上能监控的最大文件描述符数
+                            struct eopoo_event eventItem;
+                            memset(&eventItem, 0, sizeof(epoll_event));
+                            eventItem.events =     EPOLLIN;
+                            eventItem.event.fd = wWakeReadPipeFd;
+                            restlt = epoll_ctl(mEpollFd, EPOLL_CTL_ADD, mWakeReadPipeFd, &eventItem);
+                                告诉mEpollFd, 监控mWakeReadPipeFd 文件描述符的EPOLLIN事件。当管道有内容的时候，唤醒当前等待管道内容的线程。
+                                
+        Looper.loop();  进入Looper.loop() 开始消息循环
+            Looper me = mLooper();
+            MessageQueue queue = me.queue;
+            
+            while(true) {
+                Message msg = queue.next(); // might block 从消息队列取得消息，然后进行派发，最后回收
+                /android/os/MessageQueue.java 
+                    next(){
+                        for(;;){
+                            nativePollOnce(mPtr, nextPollTimeoutMillis);    // 查看是否有消息 JNI 方法
+                                /base/core/jni/android_os_MessageQueue.cpp
+                                NativeMessageQueue* nativeMessageQueue = reinterpret_cast<NativeMessageQueue*>(ptr);  
+                                nativeMessageQueue->pollOnce(timeoutMillis);   // 根据mPtr取回 java 层创建 MessageQueue 对象时在JNI 创建的NativeMessageQueue 并调用他的pollOnce函数
+                                frameworks/base/libs/utils/Looper.cpp
+                                    Looper::pollOnce(int timeoutMillis, int * outFd, int *outEvent, void ** outData)
+                                        pollInner(timeoutMillis)
+                                            int eventCount = epoll_wait(mEpollFd, eventItems, EPOLL_MAX_EVENT, timeoutMillis); // epollFd监控文件描述符是否有IO, 设置监控时间为timeoutMils.当mEpollFd监控的文件有IO事件或者超时之后，线程从epoll_wait返回了。否则线程在epoll_wait中睡眠。返回的eventCount等于0，说明超时。
+                                            for(int i = 0; i< eventCount; i++){
+                                                fd = eventItems[i].data.fd;
+                                                if(fd == mWakeReadFd){
+                                                    if(epollEvent & EPOLLIN)
+                                                        awoken();    // 关注mWakeReadPipeFd文件描述符的EPOLLIN 事件。
+                                                                        awoken 清除管道。便于下次监控。
+                                                            nRead = read(mWakeReadPipeFd, buffer, sizeof(buffer));  // awoken函数把管道里面的内容读取到 buffer 中。    
+                                                }
+                                            }                                
+                            synchronized(this) {
+                                
+                            }
+                        }
+                    }
+                        
+                msg.target.dispathMessage();
+                msg.recycle();
+            }
+        thread.detach();                
+
+2 消息发送
+    当应用程序准备好消息循环之后，其他地方就可以往这个消息队列中发送消息了。
+    ActiivtyManagerService通过调用ApplicaThread类的scheduleLaunchActivity通知应用程序，他可以加载默认activity了。
+    /base/core/java/android/app/ActivityThread.java
+    scheduleLaunchActivity()
+        ActivityClientRecord r = new ActivityClientRecord(); // 并进行初始化
+        queueOrSendMessage(H.LAUNCH_ACTIVTY, r);
+            Message msg = Message.obtain();
+            msg.what = what;
+            msg.obj = obj;
+            msg.arg1 = arg1;
+            msg.arg2 = arg2;    
+            // 该mH 类型为H，继承Handler类。定义在ActivityThread.java中，并通过成员函数handleMeaage()处理消息，改变量在应用程序进程启动之后，加载ActivityThread的main函数里面，通过Looper函数进入消息循环之前，会在进程中创建一个ActivityThread实例，同时创建该实例。
+                该变量是Handle类型，构造时调用frameworks/base/core/java/android/os/Handler.java 初始化。
+                pucli class Handler {
+                    public Handler() {
+                        mLooper = Looper.myLooper();
+                        mQueue = mLooper.mQueue;
+                    }
+                    final MesageQueue = mQueue;
+                    final Looper mLopper;  // mLooper 是 Looper类的静态成员函数。通过这个变量就可以直接访问Looper.mQueue对象了。
+                    
+                }
+            mH.senMessage(msg);  
+            /base/core/java/android/os/Handler.java  在发送消息时，是可以指定消息的处理时间的，但是通过sendMessage函数发送的消息的处理时间默认就为当前时间，即表示要马上处理，因此，从sendMessage函数中调用sendMessageDelayed函数，传入的时间参数为0，表示这个消息不要延时处理，而在sendMessageDelayed函数中，则会先获得当前时间，然后加上消息要延时处理的时间，即得到这个处理这个消息的绝对时间，然后调用sendMessageAtTime函数来把消息加入到应用程序的消息队列中去。最终调用
+                sendMessageAtTime(Message msg, long uptimeMillis)
+                    msg.target = this; // 指定消息的目标对象target
+                    sent = queue.enqueueMessage(msg, uptimeMillis);
+                    /frameworks/base/core/java/android/os/MessageQueue.java
+                        1 消息队列为空，直接将msg放在头部
+                        2 消息队列不为空，根据消息的处理时间放到合适的位置
+                        natvieWake()    //如果消息队列为空，加入消息之后就可以唤醒应用程序了。不为空则不唤醒。
+                        /base/core/jni/android_os_MessageQueue.cpp    
+                            NativeMessageQueue()
+                            /base/core/jni/android_os_MessageQueue.cpp
+                                mLooper->wake();
+                                    nWrite = write(mWakeWritePipeFd, "W", 1);  // 向管道写入一个W ， 当管道有内容之后，pollInner函数就会返回，最终返回到java层的MessageQueue.next函数中去。这个时候就会发现消息队列有消息了，开始处理消息。
+3 消息处理
+    在建立消息循环的时候，通过queue.next()取得消息之后，开发dispatch 处理消息。
+    frameworks/base/core/java/android/os/Looper.java
+    Message msg = queue.next();
+    msg.target.dispathMessage(msg);
+    frameworks/base/core/java/android/os/ Handler.java
+        handleMessage()  //由于H类在继承Handler类时，重写了handleMessage函数，因此，这里调用的实际上是H类的handleMessage函数，这个函数定义在frameworks/base/core/java/android/app/ActivityThread.java
+            switch(msg.what) {
+                case LAUNCH_ACTIVTY:{
+                    }
+            }
+参考：
+http://blog.csdn.net/tianchi92/article/details/52583632
+
+    

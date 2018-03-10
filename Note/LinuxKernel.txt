@@ -1,0 +1,394 @@
+BootROM
+    机器上电之后，执行固化在BootROM中的代码，加载BootLoader到内存
+    A. 系统寄存器会映射到集成电路中的寄存元件。BOOT ROM中的代码会利用系统寄存器来探测BOOT Media。
+        这将确定BOOT Loader的第一个阶段从哪里开始。
+    B. 一旦Boot Media顺序建立，Boot ROM就会试着加载BOOT Loader到Internal RAM。一旦BOOT Loader到位，
+        BOOTROM中的代码就会进行跳转，进而开始执行BOOT Loader。
+BootLoader
+    源码结构：    /android/bootable/bootloader/lk
+        #bootable
+        -bootloader/LK
+           -app            #功能实现，如 adb 命令
+           -arch           #CPU架构
+           -dev            #设备驱动
+           -include      #头文件
+           -kernel        #主文件，main.c
+           -lib             #库文件
+           -platform    #平台文件，如：msm8916
+           -projiect     #mk文件
+           -make       #mk文件
+           -scripts      #脚本文件
+           -target        #目标设备文件
+           AndroidBoot.mk
+           makefie
+        -recovery #由lk启动，主要用来更新主系统（即我们平时使用的Android系统）
+        -diskinstaller #打包镜像
+    1 /bootable/bootloader/lk/arch/arm/crt0.S
+        在LK的链接文件ssystem-onesegment.ld 或 system-twosegment.ld （位于bootable/bootloadler/lk/arch/arm/，
+        此文件用来指定代码的内存分布等）中指定相同目录下的crt0.S中的-start函数为入口函数：
+        do CPU setup, set up the irq,fiq,abort,undefined,system/user, and lastly supervisor mode, set up stack, clear bss
+        跳转到kmain    
+    2 /bootable/bootloader/lk/kernel/main.c
+        void kmain(void)
+        {
+            thread_init_early(); // 初始化化lk线程上下文
+            arch_early_init(); // 架构初始化，如关闭cache，使能mmu
+            platform_early_init(); // 平台早期初始化，初始化时钟和主板
+            target_early_init(); //目标设备早期初始化
+            bs_set_timestamp(BS_BL_START);
+            call_constructors(); //静态构造函数初始化
+            heap_init(); // 堆初始化
+            thread_init(); // 初始化线程
+            dpc_init();  //lk系统控制器初始化
+            timer_init(); //kernel时钟初始化
+
+        #if (!ENABLE_NANDWRITE)
+            thread_resume(thread_create("bootstrap2", &bootstrap2, NULL, DEFAULT_PRIORITY, DEFAULT_STACK_SIZE)); // 创建一个线程初始化系统
+            exit_critical_section(); //使能中断
+            thread_become_idle(); //本线程切换为idle线程
+        #else
+            bootstrap_nandwrite(); 
+        #endif
+        }
+        
+        主要函数
+        bootstrap2
+        /bootloader/lk/kernel/main.c
+            arc_inti()  //架构初始化
+            platform_init()
+                    //平台初始化，初始化时钟，超频
+                    //显示开机Logo
+                    //battery
+                    //show boot logo
+            target_inti()    //目标设别初始化，flash, 整合分区表
+            apps_inti()    //应用功能初始化，调用aboot_inti(),加载kernel
+                #define APP_START(appname) struct app_descriptor _app_##appname __SECTION(".apps") = { .name = #appname,
+                    46#define APP_END };    //app函数链接地址，当调用APP_START和APP_END时，会将函数链接到此结构此处
+                    aboot_init 就是链接在此处的函数之一
+                    /lk/app/aboot/aboot.c
+        aboot_inti
+                if (target_is_emmc_boot())
+                {
+                    page_size = mmc_page_size();
+                    page_mask = page_size - 1;
+                }
+                else
+                {
+                    page_size = flash_page_size();
+                    page_mask = page_size - 1;
+                }
+                read_device_info(&device); //读取设备信息
+                target_display_init(device.display_panel); // splash屏初始化
+                target_serialno((unsigned char *) sn_buf); //设置串口号
+                memset(display_panel_buf, '\0', MAX_PANEL_BUF_SIZE); //初始化显存
+
+                if (is_user_force_reset()) // 检查关机原因,如果强制重启则正常启动
+                    goto normal_boot;
+
+                if (keys_get_state(KEY_VOLUMEUP) && keys_get_state(KEY_VOLUMEDOWN)) // 如果按下音量上下键
+                {
+                    reboot_device(DLOAD); //重启进入紧急下载    
+                    if (!pm8x41_ponpon_pwrkey()) {//如果按下power键和音量键,进入fastboot模式,这很可能为自定义,Android源码没有
+                    boot_into_fastboot = true;
+                    }
+                /*检查重启模式,并进入相应模式*/
+                reboot_mode = check_reboot_mode();
+                hard_reboot_mode = check_hard_reboot_mode();
+                if (reboot_mode == RECOVERY_MODE ||
+                    hard_reboot_mode == RECOVERY_HARD_RESET_MODE) {
+                    boot_into_recovery = 1;
+                } else if(reboot_mode == FASTBOOT_MODE ||
+                    hard_reboot_mode == FASTBOOT_HARD_RESET_MODE) {
+                    boot_into_fastboot = true;
+                } else if(reboot_mode == ALARM_BOOT ||
+                    hard_reboot_mode == RTC_HARD_RESET_MODE) {
+                    boot_reason_alarm = true;
+                }
+                }
+
+            normal_boot:
+                if (!boot_into_fastboot)
+                {
+                    if (target_is_emmc_boot())
+                    {
+                        if(emmc_recovery_init()) //emmc_recovery初始化
+                        set_tamper_fuse_cmd();
+                        set_tamper_flag(device.is_tampered);
+                        boot_linux_from_mmc();
+                    }
+                    else 
+                    {
+                        recovery_init();  // recovery模式初始化
+                        set_tamper_flag(device.is_tampered);
+                   }
+                    boot_linux_from_flash(); //从Flash中加载启动内核
+                }
+                /*不应该执行到这儿,只有没能正常启动时才会执行到这*/
+                aboot_fastboot_register_commands(); // 注册fastboot命令,
+                partition_dump(); //dump(即保存)分区表调试信息
+                fastboot_init(target_get_scratch_address(), target_get_max_flash_size()); //初始化并进入fastboot
+            }
+            检测启动模式
+                target_display_init()  //应用程序启动之前先启动一个画面,上面简单的介绍应用程序的厂商,
+                                        厂商的LOGO,名称和版本等信息,多为一张图片
+                is_user_force_reset()
+                    首先检测是否是强制重启，直接跳转到normal_boot
+                检测按键
+                    dload 模式检测
+                    Recovery 模式检测
+                    fast_boot_mode
+                fastboot_trigger()
+                    再次检测fast_boot
+                #if USE_PON_REBOOT_REG
+                reboot_mode = check_hard_reboot_mode(); // 大概是检测硬件方面问题的重启，读取的特定位置的值。
+                #else
+                reboot_mode = check_reboot_mode();    // 宏定义，读取readl(RESTART_REASON_ADDR);
+                    if (cmd != NULL) {
+                      if (!strncmp(cmd, "bootloader", 10)) {
+                       __raw_writel(0x77665500, restart_reason);
+                      } else if (!strncmp(cmd, "recovery", 8)) {
+                       __raw_writel(0x77665502, restart_reason);
+                      } else if (!strncmp(cmd, "oem-", 4)) {
+                       unsigned long code;
+                       code = simple_strtoul(cmd + 4, NULL, 16) & 0xff;
+                       __raw_writel(0x6f656d00 | code, restart_reason);
+                      } else {
+                       __raw_writel(0x77665501, restart_reason);
+                      }
+                     } else {
+                      __raw_writel(0x77665501, restart_reason);
+                     }
+                    在kernel shutdown时，会调用restart函数写入上述位置的不同值，开机之后check_reboot_mode()回去读取        
+                    #define RECOVERY_MODE   0x77665502
+                    #define FASTBOOT_MODE   0x77665500
+                    #define ADB_REBOOT_MODE 0x77665501
+                normal_boot:
+                    if(!fastboot)
+                        if(target_is_emmc_boot())    // emmc 闪存从这里启动
+                            emmc_recovery_inti()
+                                /bootable/bootloader/lk/app/aboot/recovery.c
+--读取MISC分区中保存的写入的command命令
+                                _emmc_recovery_inti()
+                                    函数实现从MISC分区读取命令，即RecoveryManager.java中写入的/cache/comand命令
+                                    int _emmc_recovery_init(void)
+                                    {
+                                      int update_status = 0;
+                                      struct recovery_message *msg;
+                                      uint32_t block_size = 0;
+
+                                      block_size = mmc_get_device_blocksize();
+
+                                      // get recovery message
+                                      msg = (struct recovery_message *)memalign(CACHE_LINE, block_size);
+                                      ASSERT(msg);
+
+                                      if(emmc_get_recovery_msg(msg))
+                                      {
+                                        if(msg)
+                                          free(msg);
+                                        return -1;
+                                      }
+
+                                      msg->command[sizeof(msg->command)-1] = '\0'; //Ensure termination
+                                      if (msg->command[0] != 0 && msg->command[0] != 255) {
+                                        dprintf(INFO,"Recovery command: %d %s\n",
+                                          sizeof(msg->command), msg->command);
+                                      }
+                                      //...
+                                      return 0;
+                                    }
+                                    调用emmc_get_recovery_msg()
+                                        mmc_read(ptn , (unsigned int*)in, size))    
+                                    boot-recovery这条命令处理逻辑是最简单的，只是将全局变量 boot_into_recovery 
+                                        设置为 1, 这个变量在后面的加载部分会用到。 update-readio这条命令是检查基带
+                                        升级是否成功，根据状态设置 recovery_message.status, 然后设置 boot_into_recovery 为 1。
+                                        reset-device-info根据 abootinit init 部分 的分析，我们知道 deviceinfo 
+                                        的数据结构，这里是重设 device_info.is_tampered 为 0, 
+                                        并写入 emmc 中。 root-detect这条命令正好和 reset-device-info 相反，
+                                        这里会设置 device_info.is_tampered 为 1, 也就是说 device_info.is_tampered 
+                                        是手机是否 root 的标志位。
+                            target_use_signed_kernal()    //检测kernel签名
+                            boot_linux_form_mmc()
+                                check_format_bit()    //读取bootselector分区信息，存放到boot_selection_info结构检查是否进入recovery
+                                    if (in->signature == ('B' | ('S' << 8) | ('e' << 16) | ('l' << 24)) &&
+                                    (in->version == 0x00010001)) {
+                                        if ((in->state_info & (1 << 31)) &&
+                                            !(in->state_info & (1 << 30)))
+                                    boot_in_recovery = true;
+                                    }
+                                get_ffbm()
+                                    // 读取misc分区的，判断内容是否为ffbm-开头。检查内存0xFF000位置是否和boot.ima的magic值“ANDROID”相同
+                                        是的话直接按这个内存启动，不再读取emmc
+                                mmc_read(ptn+offset, (unit32_t *)buff, page_size)
+                                    按照计算得到的offset选择加载boot.img或者recovery.img到内存
+                                boot_img_hdr合法性检查 .magic=="ANDROID" .pagesize>4096
+                                imageaddr 是image缓存内存的地址
+                                kernal_actual kernal的大小
+                                ramdisk_actual ramdisk的大小
+                                从emmc缓存镜像到内存，并进行验证
+                                    boot_verifier_inti()
+                                check_aboot_addr_range_overlap()
+                                    检查镜像是否覆盖了aboot地址，涉及数据内存高低地址
+                                verify_signed_bootimg()
+                                    读取位于 boot/recovery 尾部的签名，并通过 verify_signed_bootimg 来验证签名是否能够匹配
+                                    boot_verify_image() //签名验证
+                                        platform/msm_shared/boot_verifier.c 
+                                        将 boot/recovery 的签名数据转化为 VERIFIED_BOOT_SIG * 的结构。
+                                        verify_image_with_sig ()    //验证签名
+                                            整个验证过程分为以下几个部分：
+                                            签名对应的分区是否正确，签名中携带的分区信息为以下两个成员：
+                                            分区名称：sig->authattr->target->data 名称长度：sig->authattr->target->length
+                                            检查 boot/recovery 的大小是否和签名中存储的大小信息相等，大小信息存储在以下两个成员中：
+                                            大小信息：sig->authattr->len->data 数据长度：sig->authattr->len->length
+                                            对比SHA256的值是否正确
+                                                从 keystore 中获取 rsa 公钥，ks->mykeybag->mykey->keymaterial。 使用 rsa 解密签名中携带的 SHA256 值，
+                                                sig->sig->data。 计算传入的 boot/recovery 的 SHA256 hash 值。 将解密后的 hash 和解密前的 hash 进行对比，
+                                                如果一致则签名验证通过。
+                                解压释放kernal和ramdisk
+                                    is_gzip_package()
+                                        长度不小于 10 MAGIC 为 0x1F8B08 为压缩包
+                                    decompress()
+                                        lib/zlib_inflate/decompress.c
+                                    move kernel, ramdisk, and device tree to cottect address
+                                        memove((voic *) hdr->kernal_addr, kernal_start_adddr, kernal_size)
+                                        memove((void *) hdr->ramdisk_addr,(char *)(image_addr+page_size+kernal_actual))
+                                        dev_tree_validate() //验证device tree block的数据是否合法
+                                            magic、devicetree 格式的版本是否支持                                    
+                                        if (dt_hdr_size > ROUND_TO_PAGE(dt_size,hdr->page_size))
+                                            计算验证内存的大小是否正确
+                                        dev_tree_get_entry_info()
+                                            platform/msm_shared/dev_tree.c
+                                            遍临构造device tree 
+                                            platform_dt_absolute_match ()
+                                        is_gzip_package()
+                                            解压找到的device tree
+                                        memmove((void *)hdr->tags_addr, (char *)best_match_dt_addr, dtb_size);
+                                            移动到合适的位置
+                                        dev_tree_append()
+                                            If appended dev tree is found, update the atags with memory address to the DTB
+                                        target_load_ssd_keystore()
+                                boot_linux()
+                                    PA/VA
+                                        进行vir->phys/phys->vir的转换          //目前是直接返回地址，没有转换
+                                    update_cmdline()
+                                    更新boot_image_hdr.cmdline字段的启动命令
+                                    boot_dev_buf = (char *) malloc(sizeof(char) * BOOT_DEV_MAX_LEN);
+                                            计算cmd_line的长度，申请final_cmdline的buffer
+                                        拷贝需要的 cmd 命令到 final_cmdline 中。
+                                    udpate_device_tree()
+                                        更新device tree信息。主要从device tree中解析地址信息，kernal启动之时传递给kernal方便加载
+                                    if (!boot_into_recovery && target_build_variant_user() && devinfo_present && mmc_write_protect("devinfo", 1))
+                                        写保护“devinfo”分区
+                                    target_display_shutdown()
+                                        关闭启动画面
+                                    选择启动的是64位kernal 还是32位kernal,前者通过TrustZone启动。
+                                        scm_elexec_call()    //64位 黑盒启动                                
+                        else // 从nanflash启动
+                            过程大致和boot_linx_from_emmc()相同。
+                            recovery_inti() // 
+                            boot_from_flash()
+                            
+                    else
+                        aboot_fastboot_register_commands()
+                        fastboot_inti()
+    
+启动引导
+    一 boot_linux_from_mmc
+    二 boot_linux
+    三 scm_elexec_call
+        一 boot_linux_from_mmc
+            boot_linux_from_mmc函数主要负责根据boot_into_xxx从对应的分区内读取相关信息并传给kernel，然后引导kernel。
+            boot_linux_from_mmc()函数的工作主要有： 
+            1).程序会从boot分区或者recovery分区的header中读取地址等信息，然后把kernel、ramdisk加载到内存中。
+            2).程序会从misc分区中读取bootloader_message结构体，如果有boot-recovery，则进入recovery模式
+            3).更新cmdline，然后把cmdline写到tags_addr地址，把参数传给kernel，kernel起来以后会到这个地址读取参数。
+            执行到boot_linux_from_mmc函数这里，说明这次启动不进入fastboot模式，可能的情况有：正常启动，进入recovery，开机闹钟启动。
+        
+        进入到boot_linux_from_mmc函数后，
+            1 首先创建一个用来保存boot.img文件头信息的变量hdr，buf是一个4096byte的数组，hdr和hdr指向了同一个内存地址。
+            2 执行check_format_bit，根据bootselect分区信息判断是否进入recovery模式
+            3 如果不是recovery模式，此时有两种可能，正常开机/进入ffbm工厂测试模式，进入工厂测试模式是正行启动，但是向kernel传参会多
+                一个字符串"androidboot.mode='ffbm_mode_string'"。因此这里还要调用get_ffbm，根据misc分区信息判断是否进入ffbm模式。
+            4 如果boot_into_recovery为true，就boot_into_ffbm置为false
+            5 uhdr = (struct boot_img_hdr *)EMMC_BOOT_IMG_HEADER_ADDR，计算uhdr，uhdr指向boot分区header地址
+            6 检查uhdr->magic 是否等于 "Android!"，如果是就直接跳转到kernel，这是非正常路径
+            7 如果不是recovery模式，可能是正常启动或者进入ffbm，这种情况下调用partition_get_index获取boot分区索引，调用partition_get_offset获取boot分区便宜。
+                如果是recovery模式，读取recovery分区，并获得recovery分区的偏移量。
+            8 调用mmc_set_lun设置boot或recovery分区的lun号
+            9 调用mmc_read，从boot或者recovery分区读取1字节的内容到buf(hdr)中，我们知道在boot/recovery中开始的1字节存放的是hdr的内容。
+            10 调用memcmp，判断boot.img头结构体的魔数是否正确。
+            11 根据hdr->page_size，判断是否需要更新页大小。
+            12 如果有DEVICE_TREE，计算出dt所占的页的大小 dt_actual = ROUND_TO_PAGE(hdr->dt_size, page_mask); image占的页的总大小为
+                imagesize_actual = (page_size + kernel_actual + ramdisk_actual + dt_actual);
+            如果没有DEVICE_TREE，imagesize_actual = (page_size + kernel_actual + ramdisk_actual);
+            13 检查boot.img是否与aboot的内存空间有重叠
+            14 调用函数update_ker_tags_rdisk_addr更新boot.img头结构体
+            15 将hdr中保存的物理地址转化为虚拟地址
+            hdr->kernel_addr = VA((addr_t)(hdr->kernel_addr));
+            hdr->ramdisk_addr = VA((addr_t)(hdr->ramdisk_addr));
+            hdr->tags_addr = VA((addr_t)(hdr->tags_addr));
+            16 kernel大小向上页对齐 ：kernel_actual  = ROUND_TO_PAGE(hdr->kernel_size,  page_mask)， ramdisk大小向上页对齐：
+                kernel_actual  = ROUND_TO_PAGE(hdr->kernel_size,  page_mask) 
+            17 调用函数check_aboot_addr_range_overlap，检查kernel和ramdisk的是否与aboot的内存空间有重叠
+            18 将内核，randisk，和device tree在内存中移动到正确的地址
+            19 最后在函数返回前，将会执行到boot_linux，在boot_linux中将会完成跳转到内核的操作。
+        boot_linux
+            1 首先将kernel的起始内存地址转化成entry_func_ptr函数类型：void (*entry)(unsigned, unsigned, unsigned*) 
+                = (entry_func_ptr*)(PA((addr_t)kernel));
+            2 更新cmdline：final_cmdline = update_cmdline((const char*)cmdline);
+            3 更新device tree内容，主要是三部分：memory，cmdline，ramdisk：ret 
+                = update_device_tree((void *)tags,(const char *)final_cmdline, ramdisk, ramdisk_size);
+            4  由于cmdline内容已经打包进device tree中，这里可以释放cmdline临时占用的内存：free(final_cmdline);
+            5 对devinfo分区写保护：mmc_write_protect("devinfo", 1)
+            6 完成目标板级清除动作：target_uninit()
+            7 关闭lcd：target_display_shutdown()
+            8 关闭中断:enter_critical_section();
+            9 完成平台级清除动作:platform_uninit();
+            10 禁用cache:arch_disable_cache(UCACHE),如果有mmu还要关闭mmu：arch_disable_mmu()
+            11 设置kernel入口时间戳：bs_set_timestamp(BS_KERNEL_ENTRY);
+            12 判断是32位还是64位内核，执行不同的跳转操作。对于32bit kernel，直接跳转到kernel入口函数执行。
+                对于64bit kernel，执行scm_elexec_call完成跳转。假设为64位内核，下面继续分析scm_elexec_call函数    
+        scm_elexec_call    
+启动
+    start_kernel
+        在start_kernel上半段中会调用一系列初始化函数来完成内核的初始化工作：
+        1 lockdep_init();  初始化内核死锁检测机制的哈希表
+        2 smp_setup_processor_id();  返回cpu号，单核cpu返回0
+        3 debug_objects_early_init();  对调试对象进行早期的初始化
+        4 local_irq_disable();  关闭当前cpu的中断
+        5 boot_cpu_init();  设置当前cpu位激活状态
+        6 page_address_init();   初始化高端内存的
+        7 setup_arch(&command_line);  执行内核架构相关初始化函数
+        8 boot_init_stack_canary();  初始化栈canary值，canary值用于防止栈溢出攻击的堆栈的保护字
+        9 build_all_zonelists(NULL, NULL);  建立系统内存页区(zone)链表
+        10 page_alloc_init();  内存页初始化
+        11 在parse_args函数中解析cmdline中的启动参数
+        12 etup_log_buf(0);  使用memblock_alloc分配一个启动时log缓冲区
+        13 pidhash_init();  初始化pid散列表
+        14 vfs_caches_init_early();  初始化dentry和inode的hashtable
+        15 sort_main_extable();  对内核异常向量表进行排序
+        16 trap_init();  对内核陷阱异常进行初始化，arm没有用到
+        17 mm_init();  初始化内核内存分配器，过度到伙伴系统，启动slab机制，初始化非连续内存区
+        18 sched_init();  初始化进程调度器
+        19 local_irq_disable();  关闭本地中断
+        20 rcu_init();  初始化rcu机制
+        21 init_IRQ();  初始化中断lockdep_init
+        22 tick_init();  初始化时钟滴答控制器
+        23 init_timers();  初始化内核定时器
+        24 softirq_init();  初始化软中断
+        25 time_init();  时钟初始化
+        26 profile_init();   对内核的一个性能测试工具profile进行初始化
+        27 local_irq_enable();  使能当前cpu中断
+            
+        1 kmem_cache_init_late();  初始化slab分配器的缓存机制
+        2 console_init(); 初始化控制台
+        3 lockdep_info();  打印锁的依赖信息
+        4 locking_selftest();  死锁检测
+        5 page_cgroup_init();  为page_cgroup相关结构分配存储空间
+        6 debug_objects_mem_init();  创建debug_obj的slab高速缓存
+
+http://www.freebuf.com/news/137530.html
+
+        
+        
+    
